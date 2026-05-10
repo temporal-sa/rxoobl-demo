@@ -1,0 +1,292 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import httpx
+from temporalio.client import WorkflowExecutionStatus
+from temporalio.common import WorkflowIDReusePolicy
+
+from trusted_friends.api import app, get_temporal_client
+from trusted_friends.models import (
+    ConnectionStatus,
+    SourceChannel,
+    TrustedConnectionState,
+)
+
+
+@dataclass
+class RecordedSignal:
+    name: str
+    arg: object | None
+
+
+@dataclass
+class FakeWorkflowDescription:
+    status: WorkflowExecutionStatus | None
+
+
+class FakeHandle:
+    def __init__(
+        self,
+        workflow_id: str,
+        *,
+        execution_status: WorkflowExecutionStatus | None = WorkflowExecutionStatus.RUNNING,
+    ) -> None:
+        self.workflow_id = workflow_id
+        self.execution_status = execution_status
+        self.signals: list[RecordedSignal] = []
+        self.state = TrustedConnectionState(
+            workflow_id=workflow_id,
+            requester_user_id="alice",
+            target_user_id="bob",
+            normalized_user_ids=["alice", "bob"],
+            source_channel=SourceChannel.STANDARD,
+            trigger="DOUBLE_OPT_IN",
+            are_friends=True,
+            parent_child_relationship=False,
+            status=ConnectionStatus.PENDING,
+            reason="REQUEST_SENT",
+            accepted=False,
+            consent_required=False,
+            consent_status=None,
+            created_at="2026-04-30T00:00:00+00:00",
+            updated_at="2026-04-30T00:00:00+00:00",
+            last_eligibility_event_id=None,
+        )
+
+    async def describe(self):
+        return FakeWorkflowDescription(self.execution_status)
+
+    async def signal(self, signal, arg=None):
+        self.signals.append(RecordedSignal(getattr(signal, "__name__", str(signal)), arg))
+
+    async def query(self, query, **kwargs):
+        return self.state
+
+
+class FakeTemporalClient:
+    def __init__(self) -> None:
+        self.started: list[dict[str, object]] = []
+        self.handles: dict[str, FakeHandle] = {}
+
+    async def start_workflow(self, workflow, arg, *, id: str, task_queue: str, **kwargs):
+        self.started.append(
+            {"workflow": workflow, "arg": arg, "id": id, "task_queue": task_queue, **kwargs}
+        )
+        self.handles.setdefault(id, FakeHandle(id))
+        return self.handles[id]
+
+    def get_workflow_handle(self, workflow_id: str) -> FakeHandle:
+        return self.handles.setdefault(workflow_id, FakeHandle(workflow_id))
+
+
+async def test_send_starts_pair_workflow() -> None:
+    fake = FakeTemporalClient()
+    app.dependency_overrides[get_temporal_client] = lambda: fake
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            response = await client.post(
+                "/trusted-friends/send",
+                json={
+                    "requester_user_id": "bob",
+                    "target_user_id": "alice",
+                    "source_channel": "STANDARD",
+                },
+            )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 202
+    assert response.json()["workflow_id"] == "trusted-connection-alice-bob"
+    assert fake.started[0]["id"] == "trusted-connection-alice-bob"
+    assert fake.started[0]["id_reuse_policy"] == WorkflowIDReusePolicy.ALLOW_DUPLICATE
+    assert fake.started[0]["versioning_override"] is None
+
+
+async def test_accept_signals_and_queries_pair_workflow() -> None:
+    fake = FakeTemporalClient()
+    app.dependency_overrides[get_temporal_client] = lambda: fake
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            response = await client.post("/trusted-friends/trusted-connection-alice-bob/accept")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 202
+    assert response.json() == {
+        "workflow_id": "trusted-connection-alice-bob",
+        "signal": "accept",
+        "accepted": True,
+        "status_url": "/trusted-friends/trusted-connection-alice-bob",
+    }
+    handle = fake.get_workflow_handle("trusted-connection-alice-bob")
+    assert handle.signals[0].name == "accept"
+
+
+async def test_parental_consent_signals_pair_workflow() -> None:
+    fake = FakeTemporalClient()
+    app.dependency_overrides[get_temporal_client] = lambda: fake
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            response = await client.post(
+                "/trusted-friends/trusted-connection-alice-bob/parental-consent",
+                json={"consent_id": "consent-1", "status": "APPROVED"},
+            )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 202
+    assert response.json() == {
+        "workflow_id": "trusted-connection-alice-bob",
+        "signal": "parental_consent",
+        "accepted": True,
+        "status_url": "/trusted-friends/trusted-connection-alice-bob",
+    }
+    handle = fake.get_workflow_handle("trusted-connection-alice-bob")
+    assert handle.signals[0].name == "parental_consent"
+
+
+async def test_close_signals_pair_workflow() -> None:
+    fake = FakeTemporalClient()
+    app.dependency_overrides[get_temporal_client] = lambda: fake
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            response = await client.post("/trusted-friends/trusted-connection-alice-bob/close")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 202
+    assert response.json() == {
+        "workflow_id": "trusted-connection-alice-bob",
+        "closed": True,
+    }
+    handle = fake.get_workflow_handle("trusted-connection-alice-bob")
+    assert handle.signals[0].name == "close"
+
+
+async def test_eligibility_event_starts_short_lived_workflow() -> None:
+    fake = FakeTemporalClient()
+    app.dependency_overrides[get_temporal_client] = lambda: fake
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            response = await client.post(
+                "/events/eligibility",
+                json={
+                    "event_id": "event-1",
+                    "user_id_a": "bob",
+                    "user_id_b": "alice",
+                    "changed_user_id": "alice",
+                    "snapshot": {
+                        "age": 18,
+                        "country_code": "US",
+                        "is_age_verified": False,
+                        "is_on_watchlist": True,
+                    },
+                },
+            )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 202
+    assert response.json()["workflow_id"] == "eligibility-eval-event-1"
+    assert response.json()["pair_workflow_id"] == "trusted-connection-alice-bob"
+    assert fake.started[0]["id"] == "eligibility-eval-event-1"
+    assert fake.started[0]["versioning_override"] is None
+
+
+async def test_get_returns_gone_for_terminated_pair_workflow() -> None:
+    fake = FakeTemporalClient()
+    fake.handles["trusted-connection-alice-bob"] = FakeHandle(
+        "trusted-connection-alice-bob",
+        execution_status=WorkflowExecutionStatus.TERMINATED,
+    )
+    app.dependency_overrides[get_temporal_client] = lambda: fake
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            response = await client.get("/trusted-friends/trusted-connection-alice-bob")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 410
+    assert response.json()["detail"] == {
+        "code": "WORKFLOW_NOT_RUNNING",
+        "workflow_id": "trusted-connection-alice-bob",
+        "execution_status": "TERMINATED",
+        "message": (
+            "Temporal workflow trusted-connection-alice-bob is TERMINATED; "
+            "query cannot be applied."
+        ),
+    }
+
+
+async def test_accept_does_not_signal_terminated_pair_workflow() -> None:
+    fake = FakeTemporalClient()
+    fake.handles["trusted-connection-alice-bob"] = FakeHandle(
+        "trusted-connection-alice-bob",
+        execution_status=WorkflowExecutionStatus.TERMINATED,
+    )
+    app.dependency_overrides[get_temporal_client] = lambda: fake
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            response = await client.post("/trusted-friends/trusted-connection-alice-bob/accept")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 410
+    handle = fake.get_workflow_handle("trusted-connection-alice-bob")
+    assert handle.signals == []
+
+
+async def test_eligibility_event_rejects_terminated_pair_workflow() -> None:
+    fake = FakeTemporalClient()
+    fake.handles["trusted-connection-alice-bob"] = FakeHandle(
+        "trusted-connection-alice-bob",
+        execution_status=WorkflowExecutionStatus.TERMINATED,
+    )
+    app.dependency_overrides[get_temporal_client] = lambda: fake
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            response = await client.post(
+                "/events/eligibility",
+                json={
+                    "event_id": "event-terminated",
+                    "user_id_a": "bob",
+                    "user_id_b": "alice",
+                    "changed_user_id": "alice",
+                    "snapshot": {
+                        "age": 18,
+                        "country_code": "US",
+                        "is_age_verified": False,
+                        "is_on_watchlist": True,
+                    },
+                },
+            )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 410
+    assert fake.started == []

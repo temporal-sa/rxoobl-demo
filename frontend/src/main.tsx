@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   Activity,
@@ -22,6 +22,7 @@ import {
   acceptTrustedFriend,
   closeTrustedFriend,
   getTrustedFriend,
+  isQueryBackpressureError,
   sendEligibilityEvent,
   sendParentalConsent,
   startTrustedFriend,
@@ -71,7 +72,12 @@ const actionIcons: Record<ScenarioActionKind, typeof Activity> = {
   refresh: RefreshCw,
 };
 
-const INITIAL_QUERY_RETRY_DELAYS_MS = [250, 500, 750, 1000, 1500, 2000];
+const WORKFLOW_QUERY_INTERVAL_MS = 10000;
+const INITIAL_QUERY_RETRY_DELAYS_MS = [
+  WORKFLOW_QUERY_INTERVAL_MS,
+  WORKFLOW_QUERY_INTERVAL_MS,
+  WORKFLOW_QUERY_INTERVAL_MS,
+];
 
 interface RuntimeUserSnapshots {
   requester: UserSnapshot;
@@ -99,6 +105,7 @@ function App() {
   const [busyWorkflowControl, setBusyWorkflowControl] = useState<"close" | "new" | null>(null);
   const [runtimeSnapshots, setRuntimeSnapshots] = useState<RuntimeUserSnapshots | null>(null);
   const [workflowRuns, setWorkflowRuns] = useState<WorkflowRunRecord[]>([]);
+  const lastWorkflowQueryAt = useRef<Map<string, number>>(new Map());
 
   const scenario = useMemo(
     () => scenarios.find((item) => item.id === selectedId) ?? scenarios[0],
@@ -334,37 +341,29 @@ function App() {
       }
 
       if (action.kind === "accept") {
-        const nextState = await acceptTrustedFriend(runContext.workflowId);
-        setState(nextState);
-        setWorkflowIssue(null);
-        updateActiveWorkflowRun({
-          state: nextState,
-          workflowIssue: null,
-        });
+        await acceptTrustedFriend(runContext.workflowId);
         appendEvent({
           level: "success",
           title: "Signal sent",
           detail: "AcceptTrustedFriend -> accept()",
         });
+        await refreshStateAfterAcceptedCommand(runContext.workflowId);
         return;
       }
 
       if (action.kind === "approveConsent" || action.kind === "denyConsent") {
-        const nextState = await sendParentalConsent(
+        await sendParentalConsent(
           runContext.workflowId,
           action.kind === "approveConsent" ? "APPROVED" : "DENIED",
         );
-        setState(nextState);
-        setWorkflowIssue(null);
-        updateActiveWorkflowRun({
-          state: nextState,
-          workflowIssue: null,
-        });
         appendEvent({
           level: action.kind === "approveConsent" ? "success" : "warning",
           title: "Parental consent signal",
-          detail: `ParentalConsentSignal -> ${nextState.consent_status}`,
+          detail: `ParentalConsentSignal -> ${
+            action.kind === "approveConsent" ? "APPROVED" : "DENIED"
+          }`,
         });
+        await refreshStateAfterAcceptedCommand(runContext.workflowId);
         return;
       }
 
@@ -387,8 +386,7 @@ function App() {
         title: "Eligibility workflow started",
         detail: `${action.kind} -> eligibility-eval-${scenario.id}`,
       });
-      await delay(450);
-      await refreshState(runContext.workflowId);
+      await refreshStateAfterAcceptedCommand(runContext.workflowId);
     } catch (error) {
       handleActionError(error);
     } finally {
@@ -397,6 +395,14 @@ function App() {
   }
 
   async function refreshState(workflowId: string) {
+    const now = Date.now();
+    const lastQueryAt = lastWorkflowQueryAt.current.get(workflowId) ?? 0;
+    const remainingDelay = WORKFLOW_QUERY_INTERVAL_MS - (now - lastQueryAt);
+    if (remainingDelay > 0) {
+      await delay(remainingDelay);
+    }
+    lastWorkflowQueryAt.current.set(workflowId, Date.now());
+
     const nextState = await getTrustedFriend(workflowId);
     setState(nextState);
     setWorkflowIssue(null);
@@ -409,6 +415,22 @@ function App() {
       title: "Workflow queried",
       detail: `${nextState.status} / ${nextState.reason}`,
     });
+  }
+
+  async function refreshStateAfterAcceptedCommand(workflowId: string) {
+    await delay(WORKFLOW_QUERY_INTERVAL_MS);
+    try {
+      await refreshState(workflowId);
+    } catch (error) {
+      if (!isQueryBackpressureError(error)) {
+        throw error;
+      }
+      appendEvent({
+        level: "warning",
+        title: "State refresh delayed",
+        detail: "Signal was accepted; Temporal query is still backpressured.",
+      });
+    }
   }
 
   async function refreshInitialState(workflowId: string) {

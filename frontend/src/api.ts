@@ -98,6 +98,18 @@ export function workflowIssueFromError(
   };
 }
 
+export function isQueryBackpressureError(error: unknown): boolean {
+  if (!(error instanceof ApiError) || !isApiErrorDetail(error.detail)) {
+    return false;
+  }
+  const detail = error.detail;
+  return (
+    detail.code === "TEMPORAL_UNAVAILABLE" &&
+    typeof detail.message === "string" &&
+    detail.message.includes("query")
+  );
+}
+
 function normalizeRuntimeStatus(status: string | undefined): WorkflowRuntimeStatus {
   switch (status) {
     case "RUNNING":
@@ -129,6 +141,13 @@ export interface CloseResponse {
   closed: boolean;
 }
 
+export interface SignalAcceptedResponse {
+  workflow_id: string;
+  signal: string;
+  accepted: boolean;
+  status_url: string;
+}
+
 export function startTrustedFriend(payload: SendTrustedFriendPayload) {
   return request<StartResponse>("/trusted-friends/send", {
     method: "POST",
@@ -137,13 +156,13 @@ export function startTrustedFriend(payload: SendTrustedFriendPayload) {
 }
 
 export function acceptTrustedFriend(workflowId: string) {
-  return request<TrustedConnectionState>(`/trusted-friends/${workflowId}/accept`, {
+  return request<SignalAcceptedResponse>(`/trusted-friends/${workflowId}/accept`, {
     method: "POST",
   });
 }
 
 export function sendParentalConsent(workflowId: string, status: "APPROVED" | "DENIED") {
-  return request<TrustedConnectionState>(
+  return request<SignalAcceptedResponse>(
     `/trusted-friends/${workflowId}/parental-consent`,
     {
       method: "POST",
