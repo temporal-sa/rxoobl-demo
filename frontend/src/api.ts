@@ -7,8 +7,14 @@ import type {
   UserSnapshot,
 } from "./types";
 
+// The UI is intentionally deployable without rebuilding: Vite can inject a
+// Cloud/API URL through VITE_API_BASE_URL, while local development falls back to
+// the FastAPI server started on port 8000.
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
 
+// FastAPI returns structured details for workflow lifecycle problems. The UI
+// keeps the fields optional because some failures may still be plain text from
+// middleware, proxies, or browser-level fetch behavior.
 interface ApiErrorDetail {
   code?: string;
   workflow_id?: string;
@@ -30,6 +36,9 @@ export class ApiError extends Error {
   }
 }
 
+// All API calls pass through this helper so JSON headers, structured error
+// parsing, and URL prefixing remain consistent across start, signal, query, and
+// event endpoints.
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     ...options,
@@ -47,6 +56,9 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+// Error bodies can be JSON, FastAPI's {"detail": ...} envelope, empty, or plain
+// text. Preserving the original shape lets higher-level code decide whether the
+// failure is a workflow state issue or a generic transport problem.
 async function readErrorDetail(response: Response) {
   const body = await response.text();
   if (!body) {
@@ -60,6 +72,8 @@ async function readErrorDetail(response: Response) {
   }
 }
 
+// Prefer the server's human-readable message when present, but always fall back
+// to status text so rejected promises carry useful debugging context.
 function formatApiErrorMessage(status: number, statusText: string, detail: unknown) {
   if (isApiErrorDetail(detail) && detail.message) {
     return detail.message;
@@ -78,6 +92,9 @@ export function workflowIssueFromError(
   error: unknown,
   fallbackWorkflowId?: string,
 ): WorkflowRuntimeIssue | null {
+  // A completed or missing Temporal workflow is not the same as a broken UI.
+  // Convert those API errors into displayable runtime state so the console can
+  // explain why further signals are disabled.
   if (!(error instanceof ApiError) || !isApiErrorDetail(error.detail)) {
     return null;
   }
@@ -99,6 +116,9 @@ export function workflowIssueFromError(
 }
 
 export function isQueryBackpressureError(error: unknown): boolean {
+  // Temporal Cloud returns transient unavailable/resource-exhausted failures
+  // when a workflow's consistent query buffer is full. Signals may still be
+  // accepted, so the UI treats query backpressure as a delayed refresh.
   if (!(error instanceof ApiError) || !isApiErrorDetail(error.detail)) {
     return false;
   }
@@ -111,6 +131,8 @@ export function isQueryBackpressureError(error: unknown): boolean {
 }
 
 function normalizeRuntimeStatus(status: string | undefined): WorkflowRuntimeStatus {
+  // Keep the UI's status union closed even if the server returns an unexpected
+  // Temporal enum value from a newer SDK.
   switch (status) {
     case "RUNNING":
     case "COMPLETED":
@@ -142,6 +164,8 @@ export interface CloseResponse {
 }
 
 export interface SignalAcceptedResponse {
+  // Signal endpoints return as soon as Temporal accepts delivery. The workflow
+  // may process the signal on a later task, so the UI waits before querying.
   workflow_id: string;
   signal: string;
   accepted: boolean;
@@ -167,6 +191,8 @@ export function sendParentalConsent(workflowId: string, status: "APPROVED" | "DE
     {
       method: "POST",
       body: JSON.stringify({
+        // The demo generates a client-side consent id so repeated approvals are
+        // visible as separate Temporal signal payloads during presentations.
         consent_id: `consent-${Date.now().toString(36)}`,
         status,
         timestamp: new Date().toISOString(),

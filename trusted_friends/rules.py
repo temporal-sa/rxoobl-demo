@@ -15,6 +15,12 @@ VPC_U16_COUNTRIES = {"BR", "AU"}
 
 
 def normalize_user_pair(user_id_a: str, user_id_b: str) -> tuple[str, str]:
+    """Return a stable pair ordering used by IDs, queries, and signals.
+
+    Temporal workflow IDs are unique within a namespace while a workflow is
+    open. Sorting the pair makes `alice,bob` and `bob,alice` address the same
+    durable relationship workflow instead of creating two independent histories.
+    """
     if not user_id_a or not user_id_b:
         raise ValueError("Both user IDs are required")
     if user_id_a == user_id_b:
@@ -23,16 +29,19 @@ def normalize_user_pair(user_id_a: str, user_id_b: str) -> tuple[str, str]:
 
 
 def workflow_id_for_pair(user_id_a: str, user_id_b: str) -> str:
+    """Build the deterministic workflow ID for the long-lived pair workflow."""
     first, second = normalize_user_pair(user_id_a, user_id_b)
     return f"trusted-connection-{first}-{second}"
 
 
 def requires_parental_consent(snapshot: UserEligibilitySnapshot) -> bool:
+    """Centralize region-specific consent policy used by all request paths."""
     country_code = snapshot.country_code.upper()
     return snapshot.age < 13 or (country_code in VPC_U16_COUNTRIES and snapshot.age < 16)
 
 
 def evaluate_user(snapshot: UserEligibilitySnapshot) -> EligibilityDecision:
+    """Evaluate user-level eligibility before relationship-level rules run."""
     if snapshot.age < 0 or snapshot.age > 130:
         return EligibilityDecision(False, False, "INVALID_AGE")
     if not snapshot.is_age_verified:
@@ -46,6 +55,7 @@ def evaluate_pair(
     requester: UserEligibilitySnapshot,
     target: UserEligibilitySnapshot,
 ) -> EligibilityDecision:
+    """Combine requester and target eligibility into the pair-level baseline."""
     requester_decision = evaluate_user(requester)
     if not requester_decision.eligible:
         return EligibilityDecision(False, False, f"REQUESTER_{requester_decision.reason}")
@@ -63,6 +73,7 @@ def same_trusted_friend_age_group(
     requester: UserEligibilitySnapshot,
     target: UserEligibilitySnapshot,
 ) -> bool:
+    """Model the same-age-band rule for standard double opt-in requests."""
     return (requester.age >= 18 and target.age >= 18) or (
         16 <= requester.age <= 17 and 16 <= target.age <= 17
     )
@@ -71,6 +82,12 @@ def same_trusted_friend_age_group(
 def evaluate_trusted_connection_request(
     request: TrustedConnectionRequest,
 ) -> EligibilityDecision:
+    """Apply entry-point-specific rules for a trusted friend request.
+
+    The workflow calls this through an activity, which lets product policy
+    evolve independently of the deterministic workflow loop. The returned
+    reason string is intentionally user/auditor visible in the demo timeline.
+    """
     pair_decision = evaluate_pair(request.requester_snapshot, request.target_snapshot)
     if not pair_decision.eligible:
         return pair_decision
@@ -119,6 +136,12 @@ def evaluate_trusted_connection_request(
 
 
 def evaluate_eligibility_event(event: EligibilityEvent) -> EligibilityUpdate:
+    """Translate an async business event into a workflow eligibility update.
+
+    Event workflows are short-lived: they validate one event, then signal the
+    long-lived pair workflow. That keeps fan-in from external systems out of the
+    pair workflow while preserving a durable audit trail for each event.
+    """
     if event.event_type == EligibilityEventType.PARENT_CHILD_REMOVED:
         return EligibilityUpdate(
             event_id=event.event_id,

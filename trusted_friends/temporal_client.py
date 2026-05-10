@@ -13,6 +13,12 @@ from trusted_friends.settings import (
 
 
 def temporal_client_options() -> dict[str, Any]:
+    """Build the shared Temporal client options for both API and worker.
+
+    The API starts/signals/queries workflows; the worker polls and executes
+    them. Using one helper prevents subtle namespace/TLS/API-key drift between
+    those two processes, which is especially important in Temporal Cloud.
+    """
     options: dict[str, Any] = {
         "namespace": TEMPORAL_NAMESPACE,
         "tls": TEMPORAL_TLS,
@@ -23,4 +29,5 @@ def temporal_client_options() -> dict[str, Any]:
 
 
 async def connect_temporal_client() -> Client:
+    """Connect to either Temporal Cloud or local dev based on environment."""
     return await Client.connect(TEMPORAL_ADDRESS, **temporal_client_options())

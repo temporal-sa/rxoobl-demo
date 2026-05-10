@@ -43,6 +43,9 @@ import type {
 } from "./types";
 import "./styles.css";
 
+// Maps durable workflow state into compact visual metadata. Keeping this table
+// centralized prevents buttons, timeline rows, and status pills from drifting
+// into different labels for the same Temporal status.
 const statusMeta: Record<
   ConnectionStatus,
   { label: string; tone: string; Icon: typeof Clock3 }
@@ -73,6 +76,9 @@ const actionIcons: Record<ScenarioActionKind, typeof Activity> = {
 };
 
 const WORKFLOW_QUERY_INTERVAL_MS = 10000;
+// Initial workflow tasks can take longer in Temporal Cloud than local dev,
+// especially immediately after a worker deploy. These retries give the worker
+// time to process the first task without hammering consistent queries.
 const INITIAL_QUERY_RETRY_DELAYS_MS = [
   WORKFLOW_QUERY_INTERVAL_MS,
   WORKFLOW_QUERY_INTERVAL_MS,
@@ -80,11 +86,16 @@ const INITIAL_QUERY_RETRY_DELAYS_MS = [
 ];
 
 interface RuntimeUserSnapshots {
+  // The UI updates snapshots after eligibility events so the visible user cards
+  // match the payload most recently sent to Temporal.
   requester: UserSnapshot;
   target: UserSnapshot;
 }
 
 interface WorkflowRunRecord {
+  // A scenario can have several workflow executions during a debugging session.
+  // Keeping local records lets presenters switch between runs without losing the
+  // last queried state or closed-workflow explanation.
   workflowId: string;
   scenarioId: string;
   context: RunContext;
@@ -105,6 +116,8 @@ function App() {
   const [busyWorkflowControl, setBusyWorkflowControl] = useState<"close" | "new" | null>(null);
   const [runtimeSnapshots, setRuntimeSnapshots] = useState<RuntimeUserSnapshots | null>(null);
   const [workflowRuns, setWorkflowRuns] = useState<WorkflowRunRecord[]>([]);
+  // Temporal consistent queries are cheap in local dev but can backpressure in
+  // Cloud. Track the last query per workflow and throttle every query path.
   const lastWorkflowQueryAt = useRef<Map<string, number>>(new Map());
 
   const scenario = useMemo(
@@ -118,6 +131,8 @@ function App() {
   );
 
   function appendEvent(event: Omit<DemoEvent, "id" | "at">) {
+    // The event stream is presenter-facing telemetry. It intentionally keeps
+    // only the most recent entries so the bottom panel stays readable.
     setEvents((current) => [
       {
         id: crypto.randomUUID(),
@@ -129,6 +144,8 @@ function App() {
   }
 
   function selectScenario(nextId: string) {
+    // Selecting a scenario restores its most recent run when available. This is
+    // useful when comparing Cloud behavior across several workflow executions.
     const nextScenario = scenarios.find((item) => item.id === nextId);
     const nextRun =
       workflowRuns.find((record) => record.scenarioId === nextId && !record.closedAt) ??
@@ -176,6 +193,9 @@ function App() {
   }
 
   async function startScenarioRun(forceNew: boolean) {
+    // Reuse the active workflow unless the user explicitly asks for a new run.
+    // Temporal workflows are durable, so repeated refreshes should query the
+    // same execution instead of creating duplicate pair workflows.
     if (runContext && !forceNew && !workflowIssue) {
       appendEvent({
         level: "info",
@@ -188,6 +208,8 @@ function App() {
 
     setWorkflowIssue(null);
     const token = `${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}`;
+    // Add a run token to user ids so each demo execution is isolated while still
+    // preserving the scenario's readable user prefixes.
     const requesterUserId = `${scenario.requester.id}-${token}`;
     const targetUserId = `${scenario.target.id}-${token}`;
     const response = await startTrustedFriend({
@@ -282,6 +304,8 @@ function App() {
     setBusyWorkflowControl("close");
     try {
       await closeTrustedFriend(runContext.workflowId);
+      // A close signal is terminal for this demo. Mark the local run closed
+      // immediately so the UI stops offering signals that Temporal will reject.
       const issue: WorkflowRuntimeIssue = {
         code: "WORKFLOW_CLOSED",
         workflowId: runContext.workflowId,
@@ -347,6 +371,8 @@ function App() {
           title: "Signal sent",
           detail: "AcceptTrustedFriend -> accept()",
         });
+        // Signal delivery and workflow processing are separate moments. Wait
+        // before querying so Cloud has a chance to schedule the workflow task.
         await refreshStateAfterAcceptedCommand(runContext.workflowId);
         return;
       }
@@ -374,6 +400,8 @@ function App() {
 
       const changedSnapshot = await sendScenarioEvent(action.kind, scenario, runContext);
       if (changedSnapshot) {
+        // Eligibility events mutate the requester's snapshot in this demo. Store
+        // the changed snapshot locally so the user cards mirror the event.
         const nextSnapshots = {
           requester: changedSnapshot,
           target: runtimeSnapshots?.target ?? scenario.target.snapshot,
@@ -395,6 +423,9 @@ function App() {
   }
 
   async function refreshState(workflowId: string) {
+    // Every visible refresh funnels through this throttle. It protects Temporal
+    // Cloud from repeated consistent queries when a workflow is busy processing
+    // signals or waiting for pollers.
     const now = Date.now();
     const lastQueryAt = lastWorkflowQueryAt.current.get(workflowId) ?? 0;
     const remainingDelay = WORKFLOW_QUERY_INTERVAL_MS - (now - lastQueryAt);
@@ -418,6 +449,8 @@ function App() {
   }
 
   async function refreshStateAfterAcceptedCommand(workflowId: string) {
+    // API endpoints return once Temporal accepts a command. The workflow's query
+    // state usually lags behind that acknowledgment, so delay before refreshing.
     await delay(WORKFLOW_QUERY_INTERVAL_MS);
     try {
       await refreshState(workflowId);
@@ -434,6 +467,8 @@ function App() {
   }
 
   async function refreshInitialState(workflowId: string) {
+    // Newly started workflows may not have completed their first workflow task
+    // when the POST /send response reaches the browser. Retry on a slow cadence.
     let lastError: unknown = null;
     for (const retryDelay of INITIAL_QUERY_RETRY_DELAYS_MS) {
       await delay(retryDelay);
@@ -452,6 +487,8 @@ function App() {
   }
 
   function handleActionError(error: unknown) {
+    // Closed/missing workflow errors are normal while demoing restart behavior,
+    // so surface them as runtime state instead of a generic failed toast.
     const issue = workflowIssueFromError(error, runContext?.workflowId);
     if (issue) {
       setWorkflowIssue(issue);
@@ -731,6 +768,9 @@ function RolePreviewDeck({
   busyAction: ScenarioActionKind | null;
   onRunAction: (action: ScenarioAction) => void;
 }) {
+  // Role preview models translate one workflow state into three product-facing
+  // perspectives. Keeping this as data makes it easier to verify that signals
+  // are only enabled for the role that should send them.
   const workflowUnavailable = Boolean(
     workflowIssue && runContext && workflowIssue.workflowId === runContext.workflowId,
   );
@@ -939,6 +979,8 @@ function previewBody(
   runContext: RunContext | null,
   workflowIssue: WorkflowRuntimeIssue | null,
 ) {
+  // Copy selection is intentionally state-machine-like: the same Temporal state
+  // should always produce the same requester/recipient wording.
   if (workflowIssue) {
     return copy.blocked;
   }
@@ -977,6 +1019,8 @@ function approverBody({
   approvalRequired: boolean;
   parentAuthority: boolean;
 }) {
+  // The approver pane has extra branches because some flows require VPC, some
+  // use parent-child authority, and many require no approval at all.
   if (workflowIssue) {
     return copy.blocked;
   }
@@ -1096,6 +1140,8 @@ function WorkflowManager({
   onCreateNewWorkflow: () => void;
   onSetActiveWorkflow: (workflowId: string) => void;
 }) {
+  // Workflow management is local UI state layered over durable Temporal state:
+  // switching a run only changes which execution the console queries/signals.
   const activeWorkflowId = runContext?.workflowId ?? null;
   const activeClosed = Boolean(
     workflowIssue && activeWorkflowId && workflowIssue.workflowId === activeWorkflowId,
@@ -1192,6 +1238,8 @@ function Inspector({
   onSetActiveWorkflow: (workflowId: string) => void;
   onRunAction: (action: ScenarioAction) => void;
 }) {
+  // Add refresh as a UI-only action so scenarios do not need to include it in
+  // their business-flow definitions.
   const actions = [...scenario.actions, { kind: "refresh", label: "Refresh query", description: "Query workflow state." } as ScenarioAction];
   const workflowUnavailable = Boolean(
     workflowIssue && runContext && workflowIssue.workflowId === runContext.workflowId,
@@ -1356,6 +1404,8 @@ async function sendScenarioEvent(
   scenario: Scenario,
   runContext: RunContext,
 ): Promise<UserSnapshot | null> {
+  // Async processors are represented as separate event workflows in the backend.
+  // This mapping chooses which external event type to emit for each demo button.
   const eventTypeByKind = {
     loseEligibility: "ELIGIBILITY_CHANGED",
     restoreEligibility: "ELIGIBILITY_CHANGED",
@@ -1369,6 +1419,8 @@ async function sendScenarioEvent(
   }
 
   const changedUserId = runContext.requesterUserId;
+  // For this demo all eligibility mutations affect the requester. The pair
+  // workflow receives the event through Temporal signaling after evaluation.
   const snapshot = snapshotForEvent(kind, scenario);
   await sendEligibilityEvent({
     eventId: `${scenario.id}-${kind}-${Date.now().toString(36)}`,
@@ -1383,6 +1435,8 @@ async function sendScenarioEvent(
 }
 
 function snapshotForEvent(kind: ScenarioActionKind, scenario: Scenario): UserSnapshot {
+  // Build the changed snapshot from scenario data instead of mutating the
+  // original object, which keeps scenario definitions reusable across runs.
   if (kind === "loseEligibility") {
     return {
       ...scenario.requester.snapshot,

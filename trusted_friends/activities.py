@@ -14,22 +14,32 @@ from trusted_friends.rules import (
     evaluate_trusted_connection_request,
 )
 
+# Temporal activities are the "side-effect boundary" for a workflow. Workflows
+# must be deterministic during replay, so anything that would normally call an
+# external service, publish to a queue, read a database, or consult mutable
+# business rules belongs in an activity instead of directly inside workflow code.
+
 
 @activity.defn
 def evaluate_initial_eligibility(request: TrustedConnectionRequest) -> EligibilityDecision:
-    """Fake Identity Attributes and Safety Trustbox checks for the demo."""
+    """Evaluate the initial request as if calling IDV/safety services."""
     return evaluate_trusted_connection_request(request)
 
 
 @activity.defn
 def evaluate_event_eligibility(event: EligibilityEvent) -> EligibilityUpdate:
-    """Fake event re-evaluation used by the short-lived eligibility workflow."""
+    """Evaluate a later eligibility event before it is signaled to the pair workflow."""
     return evaluate_eligibility_event(event)
 
 
 @activity.defn
 def emit_tc_change_event(event: TCChangeEvent) -> str:
-    """Fake Kafka/SQS emission. The Temporal history records every invocation."""
+    """Represent downstream event publication.
+
+    In production this is where a Kafka/SQS/EventBridge publish would happen.
+    Keeping it as an activity means Temporal records the result and will not
+    accidentally duplicate the side effect during workflow replay.
+    """
     activity.logger.info(
         "TC change event emitted",
         extra={

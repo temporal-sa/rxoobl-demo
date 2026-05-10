@@ -38,6 +38,9 @@ from trusted_friends.workflows import EligibilityEvaluationWorkflow, TrustedConn
 
 app = FastAPI(title="Trusted Friends Temporal Demo")
 
+# The frontend is a Vite dev server during demos. Restricting CORS to local
+# origins keeps the API convenient for live demos without making it an open
+# cross-origin endpoint.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -52,6 +55,13 @@ app.add_middleware(
 
 
 class DemoUserSnapshotPayload(BaseModel):
+    """Small API payload for demo user attributes.
+
+    The workflow consumes `UserEligibilitySnapshot` dataclasses. Pydantic stays
+    at the HTTP boundary where it can validate untrusted JSON before converting
+    to the workflow payload shape.
+    """
+
     age: int = Field(18, ge=0, le=130)
     country_code: str = "US"
     is_age_verified: bool = True
@@ -89,6 +99,11 @@ class EligibilityEventPayload(BaseModel):
 
 
 async def get_temporal_client() -> Client:
+    """Reuse one Temporal client per API process.
+
+    Temporal clients are safe to reuse and maintain their own connection pool.
+    Creating one per request would add avoidable Cloud connection overhead.
+    """
     client = getattr(app.state, "temporal_client", None)
     if client is None:
         client = await connect_temporal_client()
@@ -101,6 +116,7 @@ async def send_trusted_friend(
     payload: SendTrustedFriendPayload,
     client: Client = Depends(get_temporal_client),
 ) -> dict[str, object]:
+    """Start the long-lived workflow for a normalized trusted-friend pair."""
     workflow_id = workflow_id_for_pair(payload.requester_user_id, payload.target_user_id)
     request = TrustedConnectionRequest(
         requester_user_id=payload.requester_user_id,
@@ -120,12 +136,18 @@ async def send_trusted_friend(
     )
 
     try:
+        # `ALLOW_DUPLICATE` allows a new demo run after a prior workflow with
+        # the same ID has closed. While a workflow is still open, Temporal still
+        # rejects another start with the same workflow ID.
         await client.start_workflow(
             TrustedConnectionWorkflow.run,
             request,
             id=workflow_id,
             task_queue=TASK_QUEUE,
             id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
+            # When Worker Versioning is enabled, starts are routed to the
+            # deployment's current version. If disabled, this helper returns
+            # None and the workflow starts on the unversioned task queue.
             versioning_override=workflow_versioning_override(),
         )
     except WorkflowAlreadyStartedError as exc:
@@ -142,6 +164,7 @@ async def accept_trusted_friend(
     workflow_id: str,
     client: Client = Depends(get_temporal_client),
 ) -> dict[str, object]:
+    """Send the recipient acceptance signal and acknowledge it immediately."""
     handle = client.get_workflow_handle(workflow_id)
     await _signal_pair_workflow(handle, workflow_id, TrustedConnectionWorkflow.accept)
     return _signal_response(workflow_id, "accept")
@@ -153,6 +176,12 @@ async def parental_consent(
     payload: ParentalConsentPayload,
     client: Client = Depends(get_temporal_client),
 ) -> dict[str, object]:
+    """Send VPC approval/denial as a workflow signal.
+
+    The endpoint intentionally does not query after signaling. In Temporal
+    Cloud, consistent queries can backpressure when workflows are catching up;
+    the UI polls later at a slower cadence.
+    """
     handle = client.get_workflow_handle(workflow_id)
     await _signal_pair_workflow(
         handle,
@@ -172,6 +201,7 @@ async def close_trusted_friend(
     workflow_id: str,
     client: Client = Depends(get_temporal_client),
 ) -> dict[str, object]:
+    """Ask the workflow to complete gracefully."""
     handle = client.get_workflow_handle(workflow_id)
     await _signal_pair_workflow(handle, workflow_id, TrustedConnectionWorkflow.close)
     return {
@@ -185,6 +215,7 @@ async def get_trusted_friend(
     workflow_id: str,
     client: Client = Depends(get_temporal_client),
 ) -> dict[str, object]:
+    """Query workflow-owned state for the UI."""
     handle = client.get_workflow_handle(workflow_id)
     return await _query_pair_workflow_state(handle, workflow_id)
 
@@ -194,11 +225,14 @@ async def eligibility_event(
     payload: EligibilityEventPayload,
     client: Client = Depends(get_temporal_client),
 ) -> dict[str, object]:
+    """Start a short-lived workflow that processes one async eligibility event."""
     pair_workflow_id = payload.pair_workflow_id or workflow_id_for_pair(
         payload.user_id_a,
         payload.user_id_b,
     )
     pair_handle = client.get_workflow_handle(pair_workflow_id)
+    # Avoid creating orphan event workflows. If the pair workflow is already
+    # closed, the API returns a workflow-unavailable response instead.
     await _ensure_workflow_running(
         pair_handle,
         pair_workflow_id,
@@ -216,6 +250,8 @@ async def eligibility_event(
     workflow_id = f"eligibility-eval-{payload.event_id}"
 
     try:
+        # Eligibility event IDs are expected to be unique. Rejecting duplicates
+        # makes event replay/idempotency bugs visible in the demo.
         await client.start_workflow(
             EligibilityEvaluationWorkflow.run,
             event,
@@ -240,6 +276,7 @@ def _snapshot(
     user_id: str,
     payload: DemoUserSnapshotPayload | None,
 ) -> UserEligibilitySnapshot:
+    """Convert an HTTP payload into the workflow/activity dataclass shape."""
     payload = payload or DemoUserSnapshotPayload()
     return UserEligibilitySnapshot(
         user_id=user_id,
@@ -255,6 +292,7 @@ def _state_response(state: object) -> dict[str, object]:
 
 
 def _signal_response(workflow_id: str, signal: str) -> dict[str, object]:
+    """Consistent acknowledgment shape for fire-and-forget signal endpoints."""
     return {
         "workflow_id": workflow_id,
         "signal": signal,
@@ -267,6 +305,11 @@ async def _query_pair_workflow_state(
     handle: WorkflowHandle[Any, Any],
     workflow_id: str,
 ) -> dict[str, object]:
+    """Run a bounded consistent query against the pair workflow.
+
+    Queries are useful for the UI but are not part of command delivery. A short
+    timeout prevents backpressured Cloud queries from tying up API workers.
+    """
     await _ensure_workflow_running(handle, workflow_id, "query")
     try:
         state = await handle.query(
@@ -300,6 +343,7 @@ async def _signal_pair_workflow(
     signal: object,
     arg: object = _SIGNAL_ARG_UNSET,
 ) -> None:
+    """Validate the workflow is open, then send a typed signal."""
     await _ensure_workflow_running(handle, workflow_id, "signal")
     try:
         if arg is _SIGNAL_ARG_UNSET:
@@ -315,6 +359,7 @@ async def _ensure_workflow_running(
     workflow_id: str,
     operation: str,
 ) -> None:
+    """Turn closed/missing workflow executions into stable HTTP errors."""
     try:
         description = await handle.describe()
     except RPCError as exc:
@@ -329,6 +374,7 @@ def _raise_temporal_rpc_http_exception(
     workflow_id: str,
     operation: str,
 ) -> None:
+    """Map Temporal RPC failures to UI-friendly HTTP responses."""
     if exc.status == RPCStatusCode.NOT_FOUND:
         raise HTTPException(
             status_code=404,
@@ -352,6 +398,8 @@ def _raise_temporal_rpc_http_exception(
         RPCStatusCode.UNAVAILABLE,
         RPCStatusCode.RESOURCE_EXHAUSTED,
     }:
+        # Cloud query/worker backpressure should be treated as transient. The
+        # UI can keep the signal accepted and retry state refresh later.
         raise HTTPException(
             status_code=503,
             detail={
@@ -376,6 +424,7 @@ def _workflow_not_running(
     status: WorkflowExecutionStatus | None,
     operation: str,
 ) -> HTTPException:
+    """Build the 410 response used for closed workflow executions."""
     status_name = _workflow_status_name(status)
     return HTTPException(
         status_code=410,

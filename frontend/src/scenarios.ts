@@ -1,11 +1,16 @@
 import type { Scenario } from "./types";
 
+// Shared baseline for users who are eligible unless a scenario deliberately
+// mutates age verification or watchlist status.
 const verified = {
   country_code: "US",
   is_age_verified: true,
   is_on_watchlist: false,
 };
 
+// This array is data-driven demo coverage. Each scenario supplies both the
+// Temporal start payload defaults and the UI copy needed to explain what a
+// requester, approver, and recipient would see during that workflow path.
 export const scenarios: Scenario[] = [
   {
     id: "double-opt-in",

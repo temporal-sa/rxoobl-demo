@@ -23,4 +23,3 @@ frontend/coverage/
 frontend/tsconfig.tsbuildinfo
 frontend/tsconfig.node.tsbuildinfo
 .DS_Store
-scripts/deploy

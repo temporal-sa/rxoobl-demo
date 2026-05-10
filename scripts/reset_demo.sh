@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Reset is intentionally scoped to local development artifacts. It stops common
+# demo processes and removes generated files, but leaves source, .env, and
+# dependencies intact unless --deps is passed.
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DRY_RUN=0
 KEEP_SERVICES=0
@@ -60,6 +63,8 @@ say() {
   printf '%s\n' "$*"
 }
 
+# run centralizes dry-run behavior so each cleanup step can show exactly what it
+# would execute without duplicating option checks around every command.
 run() {
   if [[ "$DRY_RUN" -eq 1 ]]; then
     printf '[dry-run] %q' "$1"
@@ -80,6 +85,8 @@ stop_processes() {
   fi
 
   say "Stopping local demo services..."
+  # Match the commands this repo uses during development rather than killing
+  # broad process names. That keeps the script focused on this demo.
   local patterns=(
     "uvicorn trusted_friends.api:app --reload"
     "trusted_friends.api:app --reload"
@@ -111,6 +118,8 @@ stop_listeners_on_default_ports() {
     return 0
   fi
 
+  # Ports cover Vite, the API, Temporal gRPC, and Temporal Web UI. Port checks
+  # catch processes launched with slightly different command lines.
   local ports=(5173 8000)
   if [[ "$KEEP_TEMPORAL" -eq 0 ]]; then
     ports+=(7233 8233)
@@ -135,6 +144,8 @@ stop_listeners_on_default_ports() {
 
 remove_paths() {
   say "Removing generated artifacts..."
+  # Keep this list explicit so adding a new generated directory is a conscious
+  # decision, and so reset never expands into user-authored source by accident.
   local paths=(
     "$ROOT_DIR/.coverage"
     "$ROOT_DIR/.mypy_cache"
@@ -175,6 +186,8 @@ remove_paths() {
 
 remove_bytecode() {
   say "Removing Python bytecode and .DS_Store files..."
+  # find prunes dependency directories first; otherwise deleting bytecode from
+  # .venv or node_modules would make reset slower and could damage dependencies.
   if [[ "$DRY_RUN" -eq 1 ]]; then
     find "$ROOT_DIR" \
       \( -path "$ROOT_DIR/.venv" -o -path "$ROOT_DIR/frontend/node_modules" \) -prune \
@@ -190,6 +203,8 @@ remove_bytecode() {
 }
 
 main() {
+  # The order matters: stop processes before deleting build artifacts so running
+  # servers cannot immediately recreate files while reset is in progress.
   say "Resetting Trusted Friends demo at $ROOT_DIR"
   stop_processes
   remove_paths

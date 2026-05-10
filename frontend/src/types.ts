@@ -1,3 +1,6 @@
+// Frontend types mirror the FastAPI/Temporal DTOs, but use idiomatic camelCase
+// only for UI-only concepts. Wire objects intentionally retain snake_case so
+// fetch payloads can be serialized without lossy mapping code.
 export type ConnectionStatus =
   | "PENDING"
   | "WAITING_FOR_PARENTAL_CONSENT"
@@ -23,6 +26,9 @@ export type EligibilityEventType =
   | "PARENTAL_CONSENT_REJECTED";
 
 export interface UserSnapshot {
+  // A point-in-time view of user safety attributes. Temporal workflows store
+  // snapshots instead of fetching live user records so workflow decisions remain
+  // reproducible after retries and replays.
   age: number;
   country_code: string;
   is_age_verified: boolean;
@@ -30,6 +36,8 @@ export interface UserSnapshot {
 }
 
 export interface SendTrustedFriendPayload {
+  // Start payload for the pair workflow. The backend normalizes the two user ids
+  // into a deterministic workflow id so duplicate starts target the same pair.
   requester_user_id: string;
   target_user_id: string;
   source_channel: SourceChannel;
@@ -50,6 +58,8 @@ export interface StateTransition {
 }
 
 export interface TrustedConnectionState {
+  // Query response from TrustedConnectionWorkflow.get_state(). Everything in
+  // this object is workflow-owned state, not frontend-derived display state.
   workflow_id: string;
   requester_user_id: string;
   target_user_id: string;
@@ -81,6 +91,9 @@ export type WorkflowRuntimeStatus =
   | "UNKNOWN";
 
 export interface WorkflowRuntimeIssue {
+  // Runtime issues describe the Temporal execution itself, such as "not found"
+  // or "completed", so the UI can distinguish closed workflows from failed API
+  // calls.
   code: string;
   workflowId: string;
   executionStatus: WorkflowRuntimeStatus;
@@ -114,6 +127,8 @@ export interface ScenarioRolePreviews {
 }
 
 export interface Scenario {
+  // Scenarios are executable documentation: each one drives a concrete Temporal
+  // workflow path while also supplying the labels and role copy used in the UI.
   id: string;
   title: string;
   navLabel: string;
@@ -153,6 +168,8 @@ export interface ScenarioAction {
 }
 
 export interface DemoEvent {
+  // Local-only audit trail for presenter feedback. It is not persisted and does
+  // not affect workflow state.
   id: string;
   at: string;
   level: "info" | "success" | "warning" | "error";
@@ -161,6 +178,8 @@ export interface DemoEvent {
 }
 
 export interface RunContext {
+  // Runtime ids include a per-run token so each demo click creates fresh user
+  // ids while preserving scenario-readable prefixes.
   workflowId: string;
   requesterUserId: string;
   targetUserId: string;

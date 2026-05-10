@@ -14,6 +14,9 @@ from trusted_friends.rules import (
     workflow_id_for_pair,
 )
 
+# Rule tests pin the pure business logic separately from Temporal replay. This
+# makes eligibility behavior easy to reason about before it is embedded in a
+# workflow state machine.
 
 def test_workflow_id_for_pair_is_deterministic() -> None:
     assert workflow_id_for_pair("bob", "alice") == "trusted-connection-alice-bob"

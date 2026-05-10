@@ -1,3 +1,5 @@
+/* Global page primitives: keep the demo console dense, readable, and stable
+   across the fixed desktop-width presentation layout. */
 :root {
   color: #122026;
   background: #f7f9fb;
@@ -26,6 +28,7 @@ button {
   font: inherit;
 }
 
+/* Shell layout: top status bar, three-column workspace, and bottom event log. */
 .app-shell {
   min-height: 100vh;
   display: grid;
@@ -34,6 +37,8 @@ button {
   padding: 18px;
 }
 
+/* Shared panel treatment. Cards are reserved for actual repeated items or tool
+   surfaces; the main sections stay visually consistent. */
 .top-bar,
 .scenario-rail,
 .flow-canvas,
@@ -45,6 +50,7 @@ button {
   box-shadow: 0 12px 30px rgba(20, 38, 47, 0.06);
 }
 
+/* Top bar shows app identity plus the current API/workflow runtime status. */
 .top-bar {
   display: grid;
   grid-template-columns: auto 1fr auto auto;
@@ -120,6 +126,8 @@ button {
   box-shadow: 0 0 0 4px rgba(32, 163, 122, 0.16);
 }
 
+/* Main working area: scenario navigation, workflow visualization, and inspector
+   stay visible together so presenters can correlate actions with state. */
 .workspace {
   min-height: 0;
   display: grid;
@@ -135,6 +143,7 @@ button {
   overflow: hidden;
 }
 
+/* Scenario rail lists executable documentation examples. */
 .scenario-rail {
   padding: 14px;
   overflow-y: auto;
@@ -211,6 +220,8 @@ button {
   font-weight: 700;
 }
 
+/* Flow canvas contains the selected scenario's state, role previews, timeline,
+   and requirement coverage. */
 .flow-canvas {
   padding: 18px;
   overflow-y: auto;
@@ -236,6 +247,8 @@ button {
   margin-bottom: 16px;
 }
 
+/* Runtime alerts are intentionally prominent because closed or missing Temporal
+   executions explain why signal buttons may be disabled. */
 .runtime-alert {
   display: grid;
   grid-template-columns: auto auto 1fr;
@@ -261,6 +274,8 @@ button {
   overflow-wrap: anywhere;
 }
 
+/* Summary blocks make the workflow owner, source channel, and prerequisites
+   scannable without requiring a JSON inspector. */
 .info-block {
   min-height: 116px;
   padding: 12px;
@@ -301,6 +316,8 @@ button {
   height: 16px;
 }
 
+/* Role preview cards model requester, approver, and recipient product views.
+   Fixed rows keep card heights stable as workflow state changes. */
 .role-preview-section,
 .timeline-panel,
 .requirements,
@@ -523,6 +540,7 @@ button {
   flex: 0 0 auto;
 }
 
+/* Timeline rows render the workflow transition log returned by get_state(). */
 .timeline {
   position: relative;
   display: grid;
@@ -580,6 +598,8 @@ button {
   font-weight: 700;
 }
 
+/* Requirement coverage is static scenario documentation placed next to the live
+   workflow state so gaps are visible during demos. */
 .requirement-list {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -606,6 +626,8 @@ button {
   margin-top: 1px;
 }
 
+/* Inspector controls intentionally separate workflow lifecycle controls from
+   scenario actions, reducing accidental close/new operations. */
 .inspector {
   display: grid;
   align-content: start;
@@ -619,6 +641,7 @@ button {
   gap: 10px;
 }
 
+/* Workflow manager stores local run history for the selected scenario. */
 .active-workflow-card {
   display: grid;
   gap: 5px;
@@ -764,6 +787,7 @@ button {
   text-align: center;
 }
 
+/* Action buttons send Temporal starts, signals, event workflows, or queries. */
 .action-stack {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -809,6 +833,7 @@ button {
   }
 }
 
+/* Current state mirrors the workflow query response in a compact key/value view. */
 .state-card {
   display: grid;
   gap: 12px;
@@ -842,6 +867,8 @@ button {
   overflow-wrap: anywhere;
 }
 
+/* User cards display the input snapshots and any demo event mutation applied to
+   the requester during async eligibility scenarios. */
 .user-card {
   display: grid;
   gap: 8px;
@@ -886,6 +913,7 @@ button {
   font-weight: 800;
 }
 
+/* Status pills reuse the same tones as the status metadata table in main.tsx. */
 .status-pill {
   display: inline-flex;
   align-items: center;
@@ -920,6 +948,8 @@ button {
   background: #ffe3e2;
 }
 
+/* Event stream is local presenter telemetry for API calls, signals, workflow
+   queries, and transient Cloud backpressure. */
 .event-stream {
   padding: 14px;
 }

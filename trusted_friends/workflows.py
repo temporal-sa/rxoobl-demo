@@ -7,6 +7,9 @@ from datetime import datetime, timedelta
 from temporalio import workflow
 from temporalio.common import RetryPolicy
 
+# Workflow modules run in Temporal's deterministic sandbox. Imports inside
+# `imports_passed_through()` are treated as stable application modules rather
+# than reloaded through the sandbox on every workflow task replay.
 with workflow.unsafe.imports_passed_through():
     from trusted_friends.activities import (
         emit_tc_change_event,
@@ -41,6 +44,13 @@ ACTIVITY_RETRY_POLICY = RetryPolicy(
 
 @dataclass
 class _RelationshipRuntimeState:
+    """Mutable state owned exclusively by the workflow execution.
+
+    There is no database row for a trusted connection in this demo. Temporal
+    replays history and reconstructs this object whenever a worker picks up the
+    workflow, so every mutation must happen through deterministic workflow code.
+    """
+
     workflow_id: str = ""
     requester_user_id: str = ""
     target_user_id: str = ""
@@ -68,12 +78,20 @@ class _RelationshipRuntimeState:
 
 
 class _RelationshipValidationStateMachine:
+    """Pure state machine that turns relationship events into visible status.
+
+    Signals and activities only record facts: accepted, consent received,
+    eligibility changed, timer expired. `reconcile()` centralizes the priority
+    order for those facts so the workflow loop stays easy to audit.
+    """
+
     def apply_event(
         self,
         state: _RelationshipRuntimeState,
         event: RelationshipEvent,
         timestamp: str,
     ) -> None:
+        """Apply an event to raw state and mark it for reconciliation."""
         if event.event_type == RelationshipEventType.REQUEST_CREATED:
             state.accepted = state.accepted or event.bypass_approval
             state.pending_reason = event.reason
@@ -110,10 +128,15 @@ class _RelationshipValidationStateMachine:
 
         if event.bypass_approval:
             state.accepted = True
+
+        # Signals run during workflow task processing. Setting a flag lets the
+        # main loop decide when to emit downstream side effects after it derives
+        # a new state.
         state.needs_validation = True
         state.updated_at = timestamp
 
     def reconcile(self, state: _RelationshipRuntimeState, timestamp: str) -> bool:
+        """Derive a public status from raw facts and record a transition if changed."""
         old_status = state.status
         new_status = self.desired_status(state)
         if new_status == old_status and state.transitions:
@@ -132,6 +155,7 @@ class _RelationshipValidationStateMachine:
         return True
 
     def desired_status(self, state: _RelationshipRuntimeState) -> ConnectionStatus:
+        """Priority order matters: terminal/blocked states win over acceptance."""
         if state.consent_timed_out:
             return ConnectionStatus.EXPIRED
         if state.consent_status == ConsentStatus.DENIED:
@@ -184,6 +208,7 @@ class _RelationshipValidationStateMachine:
         state: _RelationshipRuntimeState,
         now: datetime,
     ) -> timedelta | None:
+        """Return the remaining durable-timer delay for parental consent."""
         if not state.consent_required:
             return None
         if state.consent_status is not None or state.consent_timed_out:
@@ -211,6 +236,13 @@ class _RelationshipValidationStateMachine:
 
 @workflow.defn(versioning_behavior=workflow_versioning_behavior())
 class TrustedConnectionWorkflow:
+    """Long-lived workflow that owns one normalized trusted-friend pair.
+
+    Clients address this workflow by deterministic workflow ID and send signals
+    for user actions or async eligibility events. Queries read the current
+    workflow-owned state, but the workflow history remains the source of truth.
+    """
+
     def __init__(self) -> None:
         self._state = _RelationshipRuntimeState()
         self._state_machine = _RelationshipValidationStateMachine()
@@ -218,8 +250,12 @@ class TrustedConnectionWorkflow:
 
     @workflow.run
     async def run(self, request: TrustedConnectionRequest) -> None:
+        """Initialize the pair and wait for signals/timers until closed."""
         self._initialize_state(request)
 
+        # Eligibility checks are activities because real implementations would
+        # call mutable external systems. Temporal records the activity result so
+        # replay can use the recorded value instead of re-calling the service.
         self._state.eligibility_decision = await workflow.execute_activity(
             evaluate_initial_eligibility,
             request,
@@ -228,6 +264,8 @@ class TrustedConnectionWorkflow:
         )
         self._state.consent_required = self._state.eligibility_decision.consent_required
         if self._state.consent_required:
+            # `workflow.now()` is deterministic: during replay it returns the
+            # same logical time represented by the workflow history.
             self._state.consent_deadline = workflow.now() + timedelta(
                 seconds=request.consent_ttl_seconds
             )
@@ -251,6 +289,8 @@ class TrustedConnectionWorkflow:
                     workflow.now().isoformat(),
                 )
                 if changed:
+                    # Emitting is an activity so the external publication is
+                    # retried and recorded, not duplicated by workflow replay.
                     await self._emit_status_change()
                 continue
 
@@ -269,10 +309,15 @@ class TrustedConnectionWorkflow:
                     workflow.now(),
                 )
                 if timeout is None:
+                    # With no active consent timer, the workflow can sleep
+                    # indefinitely. Signals wake the workflow by changing one
+                    # of the values observed by this condition.
                     await workflow.wait_condition(
                         lambda: self._state.needs_validation or self._close_requested,
                     )
                 else:
+                    # This is a durable timer. The worker can crash or scale to
+                    # zero and Temporal will still wake the workflow at expiry.
                     await workflow.wait_condition(
                         lambda: self._state.needs_validation or self._close_requested,
                         timeout=timeout,
@@ -287,10 +332,12 @@ class TrustedConnectionWorkflow:
 
     @workflow.signal
     async def apply_relationship_event(self, event: RelationshipEvent) -> None:
+        """Generic signal used by tests and future relationship event producers."""
         self._record_relationship_event(event)
 
     @workflow.signal
     async def accept(self) -> None:
+        """Recipient acceptance signal for double opt-in style flows."""
         self._record_relationship_event(
             RelationshipEvent(
                 event_type=RelationshipEventType.ACCEPTED,
@@ -300,6 +347,7 @@ class TrustedConnectionWorkflow:
 
     @workflow.signal
     async def parental_consent(self, consent: ParentalConsent) -> None:
+        """Parent/guardian consent signal for VPC-gated requests."""
         self._record_relationship_event(
             RelationshipEvent(
                 event_type=RelationshipEventType.PARENTAL_CONSENT_RECEIVED,
@@ -310,10 +358,12 @@ class TrustedConnectionWorkflow:
 
     @workflow.signal
     async def close(self) -> None:
+        """Complete the workflow gracefully after the demo user closes a run."""
         self._close_requested = True
 
     @workflow.signal
     async def apply_eligibility_update(self, update: EligibilityUpdate) -> None:
+        """Signal sent by the short-lived eligibility workflow."""
         self._record_relationship_event(
             RelationshipEvent(
                 event_type=RelationshipEventType.ELIGIBILITY_UPDATED,
@@ -325,9 +375,11 @@ class TrustedConnectionWorkflow:
 
     @workflow.query
     def get_state(self) -> TrustedConnectionState:
+        """Return a snapshot; queries must not mutate workflow state."""
         return self._snapshot_state()
 
     def _initialize_state(self, request: TrustedConnectionRequest) -> None:
+        """Copy immutable start payload fields into workflow-owned state."""
         state = self._state
         state.workflow_id = workflow.info().workflow_id
         state.requester_user_id = request.requester_user_id
@@ -344,6 +396,7 @@ class TrustedConnectionWorkflow:
         state.updated_at = now
 
     def _record_relationship_event(self, event: RelationshipEvent) -> None:
+        """Record the event using deterministic workflow time."""
         self._state_machine.apply_event(
             self._state,
             event,
@@ -351,6 +404,7 @@ class TrustedConnectionWorkflow:
         )
 
     async def _emit_status_change(self) -> None:
+        """Publish state transitions to downstream systems via an activity."""
         first, second = self._state.normalized_user_ids
         event = TCChangeEvent(
             event_id=str(workflow.uuid4()),
@@ -369,6 +423,7 @@ class TrustedConnectionWorkflow:
         )
 
     def _snapshot_state(self) -> TrustedConnectionState:
+        """Create an immutable query DTO from internal mutable state."""
         state = self._state
         return TrustedConnectionState(
             workflow_id=state.workflow_id,
@@ -393,8 +448,11 @@ class TrustedConnectionWorkflow:
 
 @workflow.defn(versioning_behavior=workflow_versioning_behavior())
 class EligibilityEvaluationWorkflow:
+    """Short-lived workflow that fans async eligibility events into the pair workflow."""
+
     @workflow.run
     async def run(self, event: EligibilityEvent) -> EligibilityUpdate:
+        """Evaluate one event and signal the long-lived pair workflow."""
         update = await workflow.execute_activity(
             evaluate_event_eligibility,
             event,
@@ -403,6 +461,8 @@ class EligibilityEvaluationWorkflow:
         )
         handle = workflow.get_external_workflow_handle(event.pair_workflow_id)
         try:
+            # External workflow handles let one workflow signal another without
+            # the API process being involved in the second hop.
             await handle.signal("apply_eligibility_update", update)
         except Exception as err:
             workflow.logger.warning(

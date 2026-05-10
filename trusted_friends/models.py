@@ -3,8 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+# This module intentionally contains plain dataclasses/enums only. Temporal's
+# default JSON payload converter can serialize these small value objects, and
+# keeping them side-effect-free makes them safe to import from workflow code.
+
 
 class ConnectionStatus(StrEnum):
+    """Externally visible lifecycle states for a trusted connection pair."""
+
     PENDING = "PENDING"
     WAITING_FOR_PARENTAL_CONSENT = "WAITING_FOR_PARENTAL_CONSENT"
     TRUSTED = "TRUSTED"
@@ -19,6 +25,8 @@ class ConsentStatus(StrEnum):
 
 
 class SourceChannel(StrEnum):
+    """Entry points are business-significant because each one has different rules."""
+
     STANDARD = "STANDARD"
     SHARE_LINK = "SHARE_LINK"
     QR_CODE = "QR_CODE"
@@ -37,6 +45,8 @@ class EligibilityEventType(StrEnum):
 
 
 class RelationshipEventType(StrEnum):
+    """Internal events consumed by the workflow state machine."""
+
     REQUEST_CREATED = "REQUEST_CREATED"
     ACCEPTED = "ACCEPTED"
     PARENTAL_CONSENT_RECEIVED = "PARENTAL_CONSENT_RECEIVED"
@@ -55,6 +65,8 @@ class UserEligibilitySnapshot:
 
 @dataclass
 class TrustedConnectionRequest:
+    """Start payload for the long-lived pair workflow."""
+
     requester_user_id: str
     target_user_id: str
     source_channel: SourceChannel
@@ -70,6 +82,8 @@ class TrustedConnectionRequest:
 
 @dataclass
 class EligibilityDecision:
+    """Decision returned by initial eligibility activities."""
+
     eligible: bool
     consent_required: bool
     reason: str
@@ -103,6 +117,8 @@ class EligibilityUpdate:
 
 @dataclass
 class RelationshipEvent:
+    """Normalized event shape used inside the deterministic workflow loop."""
+
     event_type: RelationshipEventType
     reason: str
     event_id: str | None = None
@@ -120,6 +136,8 @@ class StateTransition:
 
 @dataclass
 class TrustedConnectionState:
+    """Query response returned to the API/UI from workflow-owned state."""
+
     workflow_id: str
     requester_user_id: str
     target_user_id: str

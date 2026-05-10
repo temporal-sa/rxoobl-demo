@@ -28,11 +28,16 @@ from trusted_friends.rules import workflow_id_for_pair
 from trusted_friends.workflows import EligibilityEvaluationWorkflow, TrustedConnectionWorkflow
 
 
+# Workflow tests run against the Temporal test server so they exercise real task
+# polling, timers, signals, activities, and workflow queries instead of only
+# calling workflow methods directly.
 ACTIVITIES = [evaluate_initial_eligibility, evaluate_event_eligibility, emit_tc_change_event]
 TEMPORAL_CLI_PATH = shutil.which("temporal")
 
 
 async def start_temporal_environment() -> WorkflowEnvironment:
+    """Start a local Temporal test environment, reusing the CLI when installed."""
+
     kwargs = {}
     if TEMPORAL_CLI_PATH:
         kwargs["dev_server_existing_path"] = TEMPORAL_CLI_PATH
@@ -40,6 +45,8 @@ async def start_temporal_environment() -> WorkflowEnvironment:
 
 
 async def wait_for_status(handle, expected: ConnectionStatus, timeout: float = 5.0):
+    """Poll get_state until the workflow reaches the expected durable status."""
+
     deadline = asyncio.get_running_loop().time() + timeout
     last_state = None
     while asyncio.get_running_loop().time() < deadline:
@@ -51,6 +58,8 @@ async def wait_for_status(handle, expected: ConnectionStatus, timeout: float = 5
 
 
 def adult_request(user_id_a: str = "alice", user_id_b: str = "bob") -> TrustedConnectionRequest:
+    """Build the common eligible adult pair used by most workflow tests."""
+
     return TrustedConnectionRequest(
         requester_user_id=user_id_a,
         target_user_id=user_id_b,
@@ -263,6 +272,8 @@ async def test_vpc_timeout_marks_expired() -> None:
                     handle,
                     ConnectionStatus.WAITING_FOR_PARENTAL_CONSENT,
                 )
+                # This exercises the durable workflow sleep that expires pending
+                # consent when no approval/denial signal arrives.
                 await asyncio.sleep(1.5)
                 expired = await wait_for_status(handle, ConnectionStatus.EXPIRED)
                 assert expired.reason == "PARENTAL_CONSENT_TIMEOUT"
@@ -357,6 +368,8 @@ async def test_eligibility_workflow_completes_if_pair_was_terminated() -> None:
                 await wait_for_status(handle, ConnectionStatus.PENDING)
                 await handle.terminate(reason="demo cleanup")
 
+                # The event workflow should still finish and return its
+                # eligibility decision even if the target pair workflow is gone.
                 update = await env.client.execute_workflow(
                     EligibilityEvaluationWorkflow.run,
                     EligibilityEvent(

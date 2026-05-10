@@ -13,6 +13,9 @@ from trusted_friends.models import (
     TrustedConnectionState,
 )
 
+# API tests use a small fake Temporal client so endpoint behavior can be checked
+# without starting a Temporal server. The fake records workflow starts and
+# signals while returning realistic query/describe shapes.
 
 @dataclass
 class RecordedSignal:
@@ -58,6 +61,8 @@ class FakeHandle:
         return FakeWorkflowDescription(self.execution_status)
 
     async def signal(self, signal, arg=None):
+        # Store the SDK signal method name, not the bound function object, so
+        # tests can assert that endpoints target the intended workflow signal.
         self.signals.append(RecordedSignal(getattr(signal, "__name__", str(signal)), arg))
 
     async def query(self, query, **kwargs):
@@ -100,6 +105,8 @@ async def test_send_starts_pair_workflow() -> None:
         app.dependency_overrides.clear()
 
     assert response.status_code == 202
+    # User order should not matter; the backend derives one stable workflow id
+    # for the unordered pair and allows duplicate starts for repeated demos.
     assert response.json()["workflow_id"] == "trusted-connection-alice-bob"
     assert fake.started[0]["id"] == "trusted-connection-alice-bob"
     assert fake.started[0]["id_reuse_policy"] == WorkflowIDReusePolicy.ALLOW_DUPLICATE
@@ -255,6 +262,8 @@ async def test_accept_does_not_signal_terminated_pair_workflow() -> None:
 
     assert response.status_code == 410
     handle = fake.get_workflow_handle("trusted-connection-alice-bob")
+    # Lifecycle validation must happen before signal delivery so closed Cloud
+    # executions do not accumulate failing signal attempts.
     assert handle.signals == []
 
 

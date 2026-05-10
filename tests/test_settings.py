@@ -7,6 +7,8 @@ from temporalio.common import AutoUpgradeVersioningOverride, VersioningBehavior
 import trusted_friends.settings as settings
 
 
+# Keep the list explicit so each test starts from a known environment instead of
+# inheriting local .env or shell values.
 TEMPORAL_ENV_KEYS = {
     "TEMPORAL_ADDRESS",
     "TEMPORAL_API_KEY",
@@ -20,6 +22,8 @@ TEMPORAL_ENV_KEYS = {
 
 
 def reload_settings(monkeypatch, **values: str):
+    """Reload settings with only the requested Temporal environment values."""
+
     for key in TEMPORAL_ENV_KEYS:
         monkeypatch.delenv(key, raising=False)
     for key, value in values.items():
@@ -71,6 +75,8 @@ def test_workflow_start_uses_auto_upgrade_override_when_worker_versioning_enable
 
     reloaded = importlib.reload(versioning)
 
+    # The API applies this override when starting workflows so new executions are
+    # assigned to the current compatible Worker Deployment version in Cloud.
     assert reloaded.workflow_versioning_behavior() == VersioningBehavior.AUTO_UPGRADE
     assert isinstance(reloaded.workflow_versioning_override(), AutoUpgradeVersioningOverride)
 
