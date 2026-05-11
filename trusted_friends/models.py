@@ -141,6 +141,7 @@ class EligibilityUpdate:
     eligible: bool
     reason: str
     event_type: EligibilityEventType = EligibilityEventType.ELIGIBILITY_CHANGED
+    snapshot: UserEligibilitySnapshot | None = None
 
 
 @dataclass
@@ -153,6 +154,7 @@ class RelationshipEvent:
     bypass_approval: bool = False
     consent: ParentalConsent | None = None
     eligibility_update: EligibilityUpdate | None = None
+    recompute_consent_required: bool = False
 
 
 @dataclass
@@ -160,6 +162,15 @@ class StateTransition:
     status: ConnectionStatus
     reason: str
     timestamp: str
+
+
+@dataclass
+class ConfigurationChange:
+    """One operator-driven configuration field change captured by the workflow."""
+
+    reason: str
+    changed_fields: list[str]
+    subject_user_id: str | None = None
 
 
 @dataclass
@@ -182,7 +193,24 @@ class TrustedConnectionState:
     created_at: str
     updated_at: str
     last_eligibility_event_id: str | None
+    requester_snapshot: UserEligibilitySnapshot | None = None
+    target_snapshot: UserEligibilitySnapshot | None = None
+    consent_ttl_seconds: int = 120
+    auto_accept: bool = False
+    continue_as_new_count: int = 0
     transitions: list[StateTransition] = field(default_factory=list)
+
+
+@dataclass
+class TrustedConnectionContinuation:
+    """Private input used when the pair workflow rolls over with Continue-as-New."""
+
+    state: TrustedConnectionState
+    eligibility_decision: EligibilityDecision
+    consent_timed_out: bool = False
+    consent_deadline: str | None = None
+    pending_reason: str = "REQUEST_CREATED"
+    continue_as_new_count: int = 0
 
 
 @dataclass
@@ -194,3 +222,6 @@ class TCChangeEvent:
     user_id_b: str
     status: ConnectionStatus
     reason: str
+    event_type: str = "STATUS_CHANGED"
+    changed_fields: list[str] = field(default_factory=list)
+    subject_user_id: str | None = None

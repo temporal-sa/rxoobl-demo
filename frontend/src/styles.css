@@ -209,6 +209,25 @@ button {
   border-color: #abd9d6;
 }
 
+.scenario-tab.sandbox-tab {
+  margin-bottom: 12px;
+  background: #fbfcfd;
+  border-color: #dce6ea;
+}
+
+.scenario-tab.sandbox-tab.selected {
+  background: #e9f7f5;
+  border-color: #8fcfca;
+}
+
+.rail-divider {
+  margin: 4px 0 8px;
+  color: #75868e;
+  font-size: 10px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
 .scenario-title {
   font-size: 13px;
   font-weight: 800;
@@ -785,6 +804,144 @@ button {
   font-size: 12px;
   font-weight: 800;
   text-align: center;
+}
+
+.pair-editor {
+  display: grid;
+  gap: 10px;
+}
+
+.editor-users {
+  display: grid;
+  gap: 10px;
+}
+
+.editor-user-card {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  background: #fbfcfd;
+  border: 1px solid #e0e9ec;
+  border-radius: 8px;
+}
+
+.editor-user-heading {
+  display: grid;
+  gap: 2px;
+}
+
+.editor-user-heading strong {
+  color: #22343d;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.editor-user-heading span {
+  color: #72828a;
+  font-size: 11px;
+  font-weight: 800;
+  overflow-wrap: anywhere;
+}
+
+.pair-editor label {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.pair-editor label > span,
+.editor-checkbox span {
+  color: #72828a;
+  font-size: 10px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.pair-editor input,
+.pair-editor select {
+  width: 100%;
+  min-height: 34px;
+  padding: 0 8px;
+  color: #22343d;
+  background: #ffffff;
+  border: 1px solid #dce6ea;
+  border-radius: 7px;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.pair-editor input:disabled {
+  color: #74848b;
+  background: #eef3f5;
+}
+
+.editor-field-grid,
+.editor-toggle-grid,
+.editor-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.editor-toggle-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.editor-field-grid.compact,
+.editor-toggle-grid.compact {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.editor-checkbox {
+  min-height: 32px;
+  display: flex !important;
+  flex-direction: row;
+  align-items: center;
+  gap: 7px !important;
+  padding: 6px 8px;
+  background: #f8fbfc;
+  border: 1px solid #e2eaed;
+  border-radius: 7px;
+}
+
+.editor-checkbox input {
+  width: 14px;
+  min-height: 14px;
+  accent-color: #0b7572;
+}
+
+.editor-button {
+  min-height: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.editor-button.primary {
+  color: #12383a;
+  background: #e9f7f5;
+  border: 1px solid #bfe3df;
+}
+
+.editor-button.secondary {
+  color: #30444d;
+  background: #f5f8f9;
+  border: 1px solid #dce6ea;
+}
+
+.editor-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.52;
+}
+
+.editor-button svg {
+  width: 15px;
+  height: 15px;
 }
 
 /* Action buttons send Temporal starts, signals, event workflows, or queries. */

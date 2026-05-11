@@ -82,6 +82,11 @@ export interface TrustedConnectionState {
   created_at: string;
   updated_at: string;
   last_eligibility_event_id: string | null;
+  requester_snapshot: UserSnapshot | null;
+  target_snapshot: UserSnapshot | null;
+  consent_ttl_seconds: number;
+  auto_accept: boolean;
+  continue_as_new_count: number;
   transitions: StateTransition[];
 }
 
@@ -163,6 +168,15 @@ export type ScenarioActionKind =
   | "loseEligibility"
   | "restoreEligibility"
   | "ageUp"
+  | "ageUpRequester"
+  | "ageUpTarget"
+  | "blockRequester"
+  | "blockTarget"
+  | "restoreRequester"
+  | "restoreTarget"
+  | "emitChangedFacts"
+  | "removeFriendship"
+  | "restoreFriendship"
   | "removeParentChild"
   | "restoreParentChild"
   | "refresh";

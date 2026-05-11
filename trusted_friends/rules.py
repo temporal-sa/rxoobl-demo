@@ -151,6 +151,7 @@ def evaluate_eligibility_event(event: EligibilityEvent) -> EligibilityUpdate:
             eligible=False,
             reason="PARENT_CHILD_RELATIONSHIP_REMOVED",
             event_type=event.event_type,
+            snapshot=event.snapshot,
         )
 
     if event.event_type == EligibilityEventType.PARENTAL_CONSENT_REJECTED:
@@ -160,6 +161,7 @@ def evaluate_eligibility_event(event: EligibilityEvent) -> EligibilityUpdate:
             eligible=False,
             reason="PARENTAL_CONSENT_REJECTED",
             event_type=event.event_type,
+            snapshot=event.snapshot,
         )
 
     if event.event_type == EligibilityEventType.PARENT_CHILD_FORMED:
@@ -172,6 +174,7 @@ def evaluate_eligibility_event(event: EligibilityEvent) -> EligibilityUpdate:
             if decision.eligible
             else decision.reason,
             event_type=event.event_type,
+            snapshot=event.snapshot,
         )
 
     if event.event_type == EligibilityEventType.PARENTAL_CONSENT_APPROVED:
@@ -181,6 +184,7 @@ def evaluate_eligibility_event(event: EligibilityEvent) -> EligibilityUpdate:
             eligible=True,
             reason="PARENTAL_CONSENT_APPROVED",
             event_type=event.event_type,
+            snapshot=event.snapshot,
         )
 
     decision = evaluate_user(event.snapshot)
@@ -194,6 +198,7 @@ def evaluate_eligibility_event(event: EligibilityEvent) -> EligibilityUpdate:
         eligible=decision.eligible,
         reason=reason,
         event_type=event.event_type,
+        snapshot=event.snapshot,
     )
 
 

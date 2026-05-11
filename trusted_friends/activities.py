@@ -47,6 +47,9 @@ def emit_tc_change_event(event: TCChangeEvent) -> str:
             "workflow_id": event.workflow_id,
             "status": event.status,
             "reason": event.reason,
+            "event_type": event.event_type,
+            "changed_fields": event.changed_fields,
+            "subject_user_id": event.subject_user_id,
         },
     )
     return event.event_id

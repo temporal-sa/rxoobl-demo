@@ -1,6 +1,7 @@
 import type {
   DomainFactType,
   EligibilityEventType,
+  SourceChannel,
   SendTrustedFriendPayload,
   TrustedConnectionState,
   WorkflowRuntimeIssue,
@@ -210,6 +211,43 @@ export function closeTrustedFriend(workflowId: string) {
   return request<CloseResponse>(`/trusted-friends/${workflowId}/close`, {
     method: "POST",
   });
+}
+
+export function applyTrustedFriendConfiguration(
+  workflowId: string,
+  payload: {
+    sourceChannel: SourceChannel;
+    requesterUserId: string;
+    targetUserId: string;
+    requesterSnapshot: UserSnapshot;
+    targetSnapshot: UserSnapshot;
+    consentTtlSeconds: number;
+    areFriends: boolean;
+    parentChildRelationship: boolean;
+    autoAccept: boolean;
+    trigger: string;
+    metadata?: Record<string, string>;
+  },
+) {
+  return request<SignalAcceptedResponse>(
+    `/trusted-friends/${workflowId}/configuration`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        source_channel: payload.sourceChannel,
+        requester_user_id: payload.requesterUserId,
+        target_user_id: payload.targetUserId,
+        requester_snapshot: payload.requesterSnapshot,
+        target_snapshot: payload.targetSnapshot,
+        consent_ttl_seconds: payload.consentTtlSeconds,
+        are_friends: payload.areFriends,
+        parent_child_relationship: payload.parentChildRelationship,
+        auto_accept: payload.autoAccept,
+        trigger: payload.trigger,
+        metadata: payload.metadata ?? {},
+      }),
+    },
+  );
 }
 
 export function sendEligibilityEvent(payload: {

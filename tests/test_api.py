@@ -38,6 +38,7 @@ class FakeHandle:
         self.workflow_id = workflow_id
         self.execution_status = execution_status
         self.signals: list[RecordedSignal] = []
+        self.query_count = 0
         self.state = TrustedConnectionState(
             workflow_id=workflow_id,
             requester_user_id="alice",
@@ -66,6 +67,7 @@ class FakeHandle:
         self.signals.append(RecordedSignal(getattr(signal, "__name__", str(signal)), arg))
 
     async def query(self, query, **kwargs):
+        self.query_count += 1
         return self.state
 
 
@@ -98,7 +100,23 @@ async def test_send_starts_pair_workflow() -> None:
                 json={
                     "requester_user_id": "bob",
                     "target_user_id": "alice",
-                    "source_channel": "STANDARD",
+                    "source_channel": "QR_CROSS_AGE",
+                    "requester_snapshot": {
+                        "age": 12,
+                        "country_code": "BR",
+                        "is_age_verified": True,
+                        "is_on_watchlist": False,
+                    },
+                    "target_snapshot": {
+                        "age": 17,
+                        "country_code": "US",
+                        "is_age_verified": True,
+                        "is_on_watchlist": False,
+                    },
+                    "consent_ttl_seconds": 45,
+                    "are_friends": False,
+                    "parent_child_relationship": False,
+                    "auto_accept": True,
                 },
             )
     finally:
@@ -111,6 +129,14 @@ async def test_send_starts_pair_workflow() -> None:
     assert fake.started[0]["id"] == "trusted-connection-alice-bob"
     assert fake.started[0]["id_reuse_policy"] == WorkflowIDReusePolicy.ALLOW_DUPLICATE
     assert fake.started[0]["versioning_override"] is None
+    request = fake.started[0]["arg"]
+    assert request.source_channel == SourceChannel.QR_CROSS_AGE
+    assert request.requester_snapshot.age == 12
+    assert request.requester_snapshot.country_code == "BR"
+    assert request.target_snapshot.age == 17
+    assert request.consent_ttl_seconds == 45
+    assert not request.are_friends
+    assert request.auto_accept
 
 
 async def test_accept_signals_and_queries_pair_workflow() -> None:
@@ -181,6 +207,99 @@ async def test_close_signals_pair_workflow() -> None:
     }
     handle = fake.get_workflow_handle("trusted-connection-alice-bob")
     assert handle.signals[0].name == "close"
+
+
+async def test_configuration_signals_pair_workflow_with_current_ids() -> None:
+    fake = FakeTemporalClient()
+    app.dependency_overrides[get_temporal_client] = lambda: fake
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            response = await client.post(
+                "/trusted-friends/trusted-connection-alice-bob/configuration",
+                json={
+                    "source_channel": "STANDARD",
+                    "requester_user_id": "alice",
+                    "target_user_id": "bob",
+                    "requester_snapshot": {
+                        "age": 12,
+                        "country_code": "US",
+                        "is_age_verified": True,
+                        "is_on_watchlist": False,
+                    },
+                    "target_snapshot": {
+                        "age": 14,
+                        "country_code": "US",
+                        "is_age_verified": True,
+                        "is_on_watchlist": False,
+                    },
+                    "consent_ttl_seconds": 90,
+                    "are_friends": True,
+                    "parent_child_relationship": False,
+                    "auto_accept": False,
+                    "trigger": "OPERATOR_CONFIGURATION",
+                },
+            )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 202
+    assert response.json()["signal"] == "apply_configuration"
+    handle = fake.get_workflow_handle("trusted-connection-alice-bob")
+    assert handle.signals[0].name == "apply_configuration"
+    request = handle.signals[0].arg
+    assert request.requester_user_id == "alice"
+    assert request.target_user_id == "bob"
+    assert request.requester_snapshot.age == 12
+    assert request.consent_ttl_seconds == 90
+    assert handle.query_count == 0
+
+
+async def test_configuration_rejects_terminated_pair_workflow() -> None:
+    fake = FakeTemporalClient()
+    fake.handles["trusted-connection-alice-bob"] = FakeHandle(
+        "trusted-connection-alice-bob",
+        execution_status=WorkflowExecutionStatus.TERMINATED,
+    )
+    app.dependency_overrides[get_temporal_client] = lambda: fake
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            response = await client.post(
+                "/trusted-friends/trusted-connection-alice-bob/configuration",
+                json={
+                    "source_channel": "STANDARD",
+                    "requester_user_id": "alice",
+                    "target_user_id": "bob",
+                    "requester_snapshot": {
+                        "age": 18,
+                        "country_code": "US",
+                        "is_age_verified": True,
+                        "is_on_watchlist": False,
+                    },
+                    "target_snapshot": {
+                        "age": 18,
+                        "country_code": "US",
+                        "is_age_verified": True,
+                        "is_on_watchlist": False,
+                    },
+                    "consent_ttl_seconds": 120,
+                    "are_friends": True,
+                    "parent_child_relationship": False,
+                    "auto_accept": False,
+                    "trigger": "OPERATOR_CONFIGURATION",
+                },
+            )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 410
+    handle = fake.get_workflow_handle("trusted-connection-alice-bob")
+    assert handle.signals == []
 
 
 async def test_eligibility_event_starts_short_lived_workflow() -> None:

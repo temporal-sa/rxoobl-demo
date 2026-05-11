@@ -14,12 +14,14 @@ import {
   Send,
   Shield,
   ShieldAlert,
+  SlidersHorizontal,
   Timer,
   Users,
   XCircle,
 } from "lucide-react";
 import {
   acceptTrustedFriend,
+  applyTrustedFriendConfiguration,
   closeTrustedFriend,
   getTrustedFriend,
   isQueryBackpressureError,
@@ -38,6 +40,7 @@ import type {
   ScenarioAction,
   ScenarioActionKind,
   ScenarioRolePreviews,
+  SourceChannel,
   TrustedConnectionState,
   UserSnapshot,
   WorkflowRuntimeIssue,
@@ -71,11 +74,21 @@ const actionIcons: Record<ScenarioActionKind, typeof Activity> = {
   loseEligibility: AlertTriangle,
   restoreEligibility: RefreshCw,
   ageUp: Timer,
+  ageUpRequester: Timer,
+  ageUpTarget: Timer,
+  blockRequester: AlertTriangle,
+  blockTarget: AlertTriangle,
+  restoreRequester: RefreshCw,
+  restoreTarget: RefreshCw,
+  emitChangedFacts: SlidersHorizontal,
+  removeFriendship: Users,
+  restoreFriendship: Users,
   removeParentChild: ShieldAlert,
   restoreParentChild: HeartHandshake,
   refresh: RefreshCw,
 };
 
+const SANDBOX_ID = "sandbox";
 const WORKFLOW_QUERY_INTERVAL_MS = 500;
 // Initial workflow tasks can take longer in Temporal Cloud than local dev,
 // especially immediately after a worker deploy. These retries give the worker
@@ -86,11 +99,108 @@ const INITIAL_QUERY_RETRY_DELAYS_MS = [
   WORKFLOW_QUERY_INTERVAL_MS,
 ];
 
+const sourceChannelOptions: SourceChannel[] = [
+  "STANDARD",
+  "SHARE_LINK",
+  "QR_CODE",
+  "QR_CROSS_AGE",
+  "CONTACT_LIST_IMPORTER",
+  "PARENT_CHILD",
+];
+
+const sandboxScenario: Scenario = {
+  id: SANDBOX_ID,
+  title: "Trusted Friends Sandbox",
+  navLabel: "Sandbox",
+  group: "Live system",
+  objective: "Operate one trusted-friend pair directly and publish the same facts external systems would send.",
+  entryPoint: "Sandbox operator controls / domain fact stream",
+  sourceChannel: "STANDARD",
+  requester: {
+    id: "sandbox-a",
+    label: "Requester",
+    snapshot: {
+      age: 18,
+      country_code: "US",
+      is_age_verified: true,
+      is_on_watchlist: false,
+    },
+  },
+  target: {
+    id: "sandbox-b",
+    label: "Target",
+    snapshot: {
+      age: 18,
+      country_code: "US",
+      is_age_verified: true,
+      is_on_watchlist: false,
+    },
+  },
+  areFriends: true,
+  parentChildRelationship: false,
+  autoAccept: false,
+  consentTtlSeconds: 120,
+  trigger: "SANDBOX_OPERATOR",
+  expectedInitialStatus: "PENDING",
+  requirements: [
+    "Start from edited participants",
+    "Publish domain facts for participant changes",
+    "Recompute eligibility from the active workflow state",
+  ],
+  previews: {
+    requester: {
+      title: "Requester account",
+      idle: "Configure both participants, then start an active trusted-friend workflow.",
+      pending: "The requester has an active request in the workflow state machine.",
+      waiting: "The requester is waiting while required approval is completed.",
+      trusted: "The requester currently has trusted access to the target.",
+      blocked: "The requester sees trusted access unavailable for the active pair.",
+      detail: "Sandbox controls use the same start, signal, domain fact, and configuration APIs as the rest of the demo.",
+    },
+    approver: {
+      title: "Approval authority",
+      idle: "Approval appears when the active pair requires VPC or family authority.",
+      pending: "No approval is required unless the workflow enters a consent-gated state.",
+      waiting: "Approval actions become available while the workflow waits for consent.",
+      trusted: "Approval is complete or not required for the current trusted state.",
+      blocked: "Approval cannot override an ineligible or terminal pair.",
+      notRequired: "No approval required for the current sandbox configuration.",
+      detail: "The sandbox derives available buttons from live workflow state rather than scenario definitions.",
+    },
+    recipient: {
+      title: "Target account",
+      idle: "The target has no active trusted-friend workflow yet.",
+      pending: "The target can accept when double opt-in is still required.",
+      waiting: "The target is waiting on approval before trusted status can finish.",
+      trusted: "The target currently has trusted access to the requester.",
+      blocked: "The target sees trusted access suspended or closed.",
+      detail: "Participant facts can be emitted for either side of the pair.",
+    },
+  },
+  actions: [],
+};
+
 interface RuntimeUserSnapshots {
   // The UI updates snapshots after eligibility events so the visible user cards
   // match the payload most recently sent to Temporal.
   requester: UserSnapshot;
   target: UserSnapshot;
+}
+
+interface PairEditorUserDraft {
+  idPrefix: string;
+  label: string;
+  snapshot: UserSnapshot;
+}
+
+interface PairEditorDraft {
+  requester: PairEditorUserDraft;
+  target: PairEditorUserDraft;
+  sourceChannel: SourceChannel;
+  areFriends: boolean;
+  parentChildRelationship: boolean;
+  autoAccept: boolean;
+  consentTtlSeconds: number;
 }
 
 interface WorkflowRunRecord {
@@ -102,9 +212,81 @@ interface WorkflowRunRecord {
   context: RunContext;
   state: TrustedConnectionState | null;
   runtimeSnapshots: RuntimeUserSnapshots;
+  editorDraft: PairEditorDraft;
   workflowIssue: WorkflowRuntimeIssue | null;
   createdAt: string;
   closedAt: string | null;
+}
+
+interface SandboxFactChange {
+  factType: DomainFactType;
+  subjectRole: "requester" | "target";
+  subjectUserId: string;
+  snapshot: UserSnapshot;
+  label: string;
+}
+
+function draftFromScenario(scenario: Scenario): PairEditorDraft {
+  return {
+    requester: {
+      idPrefix: scenario.requester.id,
+      label: scenario.requester.label,
+      snapshot: { ...scenario.requester.snapshot },
+    },
+    target: {
+      idPrefix: scenario.target.id,
+      label: scenario.target.label,
+      snapshot: { ...scenario.target.snapshot },
+    },
+    sourceChannel: scenario.sourceChannel,
+    areFriends: scenario.areFriends,
+    parentChildRelationship: scenario.parentChildRelationship,
+    autoAccept: scenario.autoAccept,
+    consentTtlSeconds: scenario.consentTtlSeconds,
+  };
+}
+
+function snapshotsFromDraft(draft: PairEditorDraft): RuntimeUserSnapshots {
+  return {
+    requester: { ...draft.requester.snapshot },
+    target: { ...draft.target.snapshot },
+  };
+}
+
+function snapshotsFromState(state: TrustedConnectionState): RuntimeUserSnapshots | null {
+  if (!state.requester_snapshot || !state.target_snapshot) {
+    return null;
+  }
+  return {
+    requester: state.requester_snapshot,
+    target: state.target_snapshot,
+  };
+}
+
+function connectionDraftFromWorkflowState(
+  draft: PairEditorDraft,
+  state: TrustedConnectionState | null,
+): PairEditorDraft {
+  if (!state) {
+    return draft;
+  }
+
+  return {
+    ...draft,
+    requester: {
+      ...draft.requester,
+      snapshot: state.requester_snapshot ?? draft.requester.snapshot,
+    },
+    target: {
+      ...draft.target,
+      snapshot: state.target_snapshot ?? draft.target.snapshot,
+    },
+    sourceChannel: state.source_channel,
+    areFriends: state.are_friends,
+    parentChildRelationship: state.parent_child_relationship,
+    autoAccept: state.auto_accept,
+    consentTtlSeconds: state.consent_ttl_seconds,
+  };
 }
 
 function App() {
@@ -116,13 +298,21 @@ function App() {
   const [busyAction, setBusyAction] = useState<ScenarioActionKind | null>(null);
   const [busyWorkflowControl, setBusyWorkflowControl] = useState<"close" | "new" | null>(null);
   const [runtimeSnapshots, setRuntimeSnapshots] = useState<RuntimeUserSnapshots | null>(null);
+  const [editorDraft, setEditorDraft] = useState<PairEditorDraft>(() =>
+    draftFromScenario(scenarios[0]),
+  );
+  const [busyEditor, setBusyEditor] = useState(false);
   const [workflowRuns, setWorkflowRuns] = useState<WorkflowRunRecord[]>([]);
   // Temporal consistent queries are cheap in local dev but can backpressure in
   // Cloud. Track the last query per workflow and throttle every query path.
   const lastWorkflowQueryAt = useRef<Map<string, number>>(new Map());
 
+  const isSandbox = selectedId === SANDBOX_ID;
   const scenario = useMemo(
-    () => scenarios.find((item) => item.id === selectedId) ?? scenarios[0],
+    () =>
+      selectedId === SANDBOX_ID
+        ? sandboxScenario
+        : scenarios.find((item) => item.id === selectedId) ?? scenarios[0],
     [selectedId],
   );
 
@@ -147,7 +337,8 @@ function App() {
   function selectScenario(nextId: string) {
     // Selecting a scenario restores its most recent run when available. This is
     // useful when comparing Cloud behavior across several workflow executions.
-    const nextScenario = scenarios.find((item) => item.id === nextId);
+    const nextScenario =
+      nextId === SANDBOX_ID ? sandboxScenario : scenarios.find((item) => item.id === nextId);
     const nextRun =
       workflowRuns.find((record) => record.scenarioId === nextId && !record.closedAt) ??
       workflowRuns.find((record) => record.scenarioId === nextId);
@@ -160,10 +351,11 @@ function App() {
       setRunContext(null);
       setWorkflowIssue(null);
       setRuntimeSnapshots(null);
+      setEditorDraft(nextScenario ? draftFromScenario(nextScenario) : draftFromScenario(scenarios[0]));
     }
     appendEvent({
       level: "info",
-      title: "Scenario selected",
+      title: nextId === SANDBOX_ID ? "Sandbox selected" : "Scenario selected",
       detail: nextScenario?.title ?? nextId,
     });
   }
@@ -173,6 +365,7 @@ function App() {
     setState(record.state);
     setWorkflowIssue(record.workflowIssue);
     setRuntimeSnapshots(record.runtimeSnapshots);
+    setEditorDraft(record.editorDraft);
   }
 
   function updateWorkflowRun(
@@ -211,21 +404,22 @@ function App() {
     const token = `${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}`;
     // Add a run token to user ids so each demo execution is isolated while still
     // preserving the scenario's readable user prefixes.
-    const requesterUserId = `${scenario.requester.id}-${token}`;
-    const targetUserId = `${scenario.target.id}-${token}`;
+    const requesterUserId = `${editorDraft.requester.idPrefix}-${token}`;
+    const targetUserId = `${editorDraft.target.idPrefix}-${token}`;
     const response = await startTrustedFriend({
       requester_user_id: requesterUserId,
       target_user_id: targetUserId,
-      source_channel: scenario.sourceChannel,
-      requester_snapshot: scenario.requester.snapshot,
-      target_snapshot: scenario.target.snapshot,
-      consent_ttl_seconds: scenario.consentTtlSeconds,
-      are_friends: scenario.areFriends,
-      parent_child_relationship: scenario.parentChildRelationship,
-      auto_accept: scenario.autoAccept,
+      source_channel: editorDraft.sourceChannel,
+      requester_snapshot: editorDraft.requester.snapshot,
+      target_snapshot: editorDraft.target.snapshot,
+      consent_ttl_seconds: editorDraft.consentTtlSeconds,
+      are_friends: editorDraft.areFriends,
+      parent_child_relationship: editorDraft.parentChildRelationship,
+      auto_accept: editorDraft.autoAccept,
       trigger: scenario.trigger,
       metadata: {
-        scenario_id: scenario.id,
+        mode: isSandbox ? "sandbox" : "scenario",
+        scenario_id: isSandbox ? "" : scenario.id,
         entry_point: scenario.entryPoint,
       },
     });
@@ -235,10 +429,7 @@ function App() {
       targetUserId,
       runToken: token,
     };
-    const nextSnapshots = {
-      requester: scenario.requester.snapshot,
-      target: scenario.target.snapshot,
-    };
+    const nextSnapshots = snapshotsFromDraft(editorDraft);
     setRunContext(nextContext);
     setState(null);
     setRuntimeSnapshots(nextSnapshots);
@@ -249,6 +440,7 @@ function App() {
         context: nextContext,
         state: null,
         runtimeSnapshots: nextSnapshots,
+        editorDraft,
         workflowIssue: null,
         createdAt: new Date().toISOString(),
         closedAt: null,
@@ -330,12 +522,174 @@ function App() {
     }
   }
 
+  function updateEditorDraft(update: PairEditorDraft) {
+    setEditorDraft(update);
+    updateActiveWorkflowRun({ editorDraft: update });
+  }
+
+  function resetEditorDraft() {
+    updateEditorDraft(draftFromScenario(scenario));
+    appendEvent({
+      level: "info",
+      title: "Editor reset",
+      detail: scenario.title,
+    });
+  }
+
+  async function applyEditorConfiguration() {
+    if (isSandbox) {
+      await applySandboxEditorChanges(editorDraft);
+      return;
+    }
+    if (!runContext) {
+      appendEvent({
+        level: "warning",
+        title: "Start required",
+        detail: "Start a workflow before applying live configuration changes.",
+      });
+      return;
+    }
+    if (state && isTerminalStatus(state.status)) {
+      appendEvent({
+        level: "warning",
+        title: "New workflow required",
+        detail: "Terminal workflows cannot be resurrected by editor changes.",
+      });
+      return;
+    }
+
+    setBusyEditor(true);
+    try {
+      await applyTrustedFriendConfiguration(runContext.workflowId, {
+        sourceChannel: editorDraft.sourceChannel,
+        requesterUserId: runContext.requesterUserId,
+        targetUserId: runContext.targetUserId,
+        requesterSnapshot: editorDraft.requester.snapshot,
+        targetSnapshot: editorDraft.target.snapshot,
+        consentTtlSeconds: editorDraft.consentTtlSeconds,
+        areFriends: editorDraft.areFriends,
+        parentChildRelationship: editorDraft.parentChildRelationship,
+        autoAccept: editorDraft.autoAccept,
+        trigger: "OPERATOR_CONFIGURATION",
+        metadata: {
+          scenario_id: scenario.id,
+          entry_point: scenario.entryPoint,
+        },
+      });
+      const nextSnapshots = snapshotsFromDraft(editorDraft);
+      setRuntimeSnapshots(nextSnapshots);
+      updateActiveWorkflowRun({
+        runtimeSnapshots: nextSnapshots,
+        editorDraft,
+      });
+      appendEvent({
+        level: "success",
+        title: "Configuration applied",
+        detail: runContext.workflowId,
+      });
+      await refreshStateAfterAcceptedCommand(runContext.workflowId);
+    } catch (error) {
+      handleActionError(error);
+    } finally {
+      setBusyEditor(false);
+    }
+  }
+
+  async function applySandboxEditorChanges(draft: PairEditorDraft) {
+    if (!runContext) {
+      appendEvent({
+        level: "warning",
+        title: "Start required",
+        detail: "Start the sandbox workflow before emitting live fact changes.",
+      });
+      return;
+    }
+    if (state && isTerminalStatus(state.status)) {
+      appendEvent({
+        level: "warning",
+        title: "New workflow required",
+        detail: "Terminal workflows cannot receive sandbox fact changes.",
+      });
+      return;
+    }
+
+    const factChanges = sandboxFactChanges({
+      draft,
+      state,
+      runtimeSnapshots,
+      runContext,
+    });
+    const configurationLabels = sandboxConfigurationChangeLabels(draft, state);
+    const configurationDirty = sandboxConfigurationDirty(draft, state);
+    if (factChanges.length === 0 && !configurationDirty) {
+      appendEvent({
+        level: "info",
+        title: "No sandbox changes",
+        detail: "The editor matches the last queried workflow state.",
+      });
+      return;
+    }
+
+    setBusyEditor(true);
+    try {
+      for (const change of factChanges) {
+        await sendDomainFact({
+          factId: `${runContext.runToken}-sandbox-${change.factType}-${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 6)}`,
+          factType: change.factType,
+          workflowId: runContext.workflowId,
+          userIdA: runContext.requesterUserId,
+          userIdB: runContext.targetUserId,
+          subjectUserId: change.subjectUserId,
+          snapshot: change.snapshot,
+        });
+      }
+
+      await applyTrustedFriendConfiguration(runContext.workflowId, {
+        sourceChannel: draft.sourceChannel,
+        requesterUserId: runContext.requesterUserId,
+        targetUserId: runContext.targetUserId,
+        requesterSnapshot: draft.requester.snapshot,
+        targetSnapshot: draft.target.snapshot,
+        consentTtlSeconds: draft.consentTtlSeconds,
+        areFriends: draft.areFriends,
+        parentChildRelationship: draft.parentChildRelationship,
+        autoAccept: draft.autoAccept,
+        trigger: "SANDBOX_CONFIGURATION",
+        metadata: {
+          mode: "sandbox",
+          fact_count: String(factChanges.length),
+        },
+      });
+
+      const nextSnapshots = snapshotsFromDraft(draft);
+      setEditorDraft(draft);
+      setRuntimeSnapshots(nextSnapshots);
+      updateActiveWorkflowRun({
+        runtimeSnapshots: nextSnapshots,
+        editorDraft: draft,
+      });
+      appendEvent({
+        level: "success",
+        title: "Sandbox changes emitted",
+        detail: sandboxChangeSummary(factChanges, configurationLabels),
+      });
+      await refreshStateAfterAcceptedCommand(runContext.workflowId);
+    } catch (error) {
+      handleActionError(error);
+    } finally {
+      setBusyEditor(false);
+    }
+  }
+
   async function setActiveWorkflow(workflowId: string) {
     const record = workflowRuns.find((item) => item.workflowId === workflowId);
     if (!record) {
       return;
     }
-    const nextScenario = scenarios.find((item) => item.id === record.scenarioId);
+    const nextScenario =
+      record.scenarioId === SANDBOX_ID
+        ? sandboxScenario
+        : scenarios.find((item) => item.id === record.scenarioId);
     setSelectedId(record.scenarioId);
     applyWorkflowRun(record);
     appendEvent({
@@ -399,16 +753,38 @@ function App() {
         return;
       }
 
-      const changedSnapshot = await sendScenarioEvent(action.kind, scenario, runContext);
+      if (isSandbox && isSandboxAction(action.kind)) {
+        const actionBaseDraft =
+          action.kind === "emitChangedFacts"
+            ? editorDraft
+            : connectionDraftFromWorkflowState(editorDraft, state);
+        const nextDraft = draftForSandboxAction(action.kind, actionBaseDraft);
+        updateEditorDraft(nextDraft);
+        await applySandboxEditorChanges(nextDraft);
+        return;
+      }
+
+      const changedSnapshot = await sendScenarioEvent(action.kind, editorDraft, runContext);
       if (changedSnapshot) {
         // Eligibility events mutate the requester's snapshot in this demo. Store
         // the changed snapshot locally so the user cards mirror the event.
         const nextSnapshots = {
           requester: changedSnapshot,
-          target: runtimeSnapshots?.target ?? scenario.target.snapshot,
+          target: runtimeSnapshots?.target ?? editorDraft.target.snapshot,
         };
+        const nextDraft = {
+          ...editorDraft,
+          requester: {
+            ...editorDraft.requester,
+            snapshot: changedSnapshot,
+          },
+        };
+        setEditorDraft(nextDraft);
         setRuntimeSnapshots(nextSnapshots);
-        updateActiveWorkflowRun({ runtimeSnapshots: nextSnapshots });
+        updateActiveWorkflowRun({
+          runtimeSnapshots: nextSnapshots,
+          editorDraft: nextDraft,
+        });
       }
       appendEvent({
         level: "info",
@@ -436,11 +812,16 @@ function App() {
     lastWorkflowQueryAt.current.set(workflowId, Date.now());
 
     const nextState = await getTrustedFriend(workflowId);
+    const nextSnapshots = snapshotsFromState(nextState);
     setState(nextState);
     setWorkflowIssue(null);
+    if (nextSnapshots) {
+      setRuntimeSnapshots(nextSnapshots);
+    }
     updateWorkflowRun(workflowId, {
       state: nextState,
       workflowIssue: null,
+      ...(nextSnapshots ? { runtimeSnapshots: nextSnapshots } : {}),
     });
     appendEvent({
       level: "info",
@@ -520,6 +901,8 @@ function App() {
         />
         <FlowCanvas
           scenario={scenario}
+          isSandbox={isSandbox}
+          editorDraft={editorDraft}
           state={state}
           runContext={runContext}
           workflowIssue={workflowIssue}
@@ -533,11 +916,17 @@ function App() {
           workflowIssue={workflowIssue}
           busyAction={busyAction}
           busyWorkflowControl={busyWorkflowControl}
+          busyEditor={busyEditor}
           runtimeSnapshots={runtimeSnapshots}
+          editorDraft={editorDraft}
           workflowRuns={scenarioWorkflowRuns}
           onCloseActiveWorkflow={closeActiveWorkflow}
           onCreateNewWorkflow={createNewActiveWorkflow}
           onSetActiveWorkflow={setActiveWorkflow}
+          onUpdateEditorDraft={updateEditorDraft}
+          onResetEditorDraft={resetEditorDraft}
+          onApplyEditorConfiguration={applyEditorConfiguration}
+          isSandbox={isSandbox}
           onRunAction={runAction}
         />
       </section>
@@ -591,8 +980,17 @@ function ScenarioRail({
     <aside className="scenario-rail">
       <div className="rail-heading">
         <span>Trusted Friend Flows</span>
-        <strong>{scenarios.length}</strong>
+        <strong>{scenarios.length + 1}</strong>
       </div>
+      <button
+        className={`scenario-tab sandbox-tab ${selectedId === SANDBOX_ID ? "selected" : ""}`}
+        onClick={() => onSelect(SANDBOX_ID)}
+      >
+        <span className="scenario-title">Sandbox</span>
+        <span className="scenario-group">Live system</span>
+        {selectedId === SANDBOX_ID && activeStatus ? <StatusPill status={activeStatus} /> : null}
+      </button>
+      <div className="rail-divider">Scenarios</div>
       {scenarios.map((scenario) => {
         const selected = scenario.id === selectedId;
         return (
@@ -613,6 +1011,8 @@ function ScenarioRail({
 
 function FlowCanvas({
   scenario,
+  isSandbox,
+  editorDraft,
   state,
   runContext,
   workflowIssue,
@@ -620,6 +1020,8 @@ function FlowCanvas({
   onRunAction,
 }: {
   scenario: Scenario;
+  isSandbox: boolean;
+  editorDraft: PairEditorDraft;
   state: TrustedConnectionState | null;
   runContext: RunContext | null;
   workflowIssue: WorkflowRuntimeIssue | null;
@@ -629,6 +1031,20 @@ function FlowCanvas({
   const displayedTransitions = state?.transitions?.length
     ? state.transitions
     : [{ status: scenario.expectedInitialStatus, reason: "Expected first state", timestamp: "" }];
+  const connectionDraft = isSandbox
+    ? connectionDraftFromWorkflowState(editorDraft, state)
+    : editorDraft;
+  const sourceChannel = isSandbox ? connectionDraft.sourceChannel : scenario.sourceChannel;
+  const friendshipValue = isSandbox
+    ? connectionDraft.areFriends
+      ? "Friends currently true"
+      : "Friends currently false"
+    : scenario.areFriends
+      ? "Required / satisfied"
+      : "Not required";
+  const requirements = isSandbox
+    ? sandboxRequirements(connectionDraft, state, runContext)
+    : scenario.requirements;
 
   return (
     <section className="flow-canvas">
@@ -644,13 +1060,15 @@ function FlowCanvas({
 
       <div className="flow-grid">
         <InfoBlock label="Entry point" value={scenario.entryPoint} icon={<GitBranch />} />
-        <InfoBlock label="Source channel" value={scenario.sourceChannel} icon={<Link2 />} />
-        <InfoBlock label="Friendship prerequisite" value={scenario.areFriends ? "Required / satisfied" : "Not required"} icon={<Users />} />
+        <InfoBlock label="Source channel" value={sourceChannel} icon={<Link2 />} />
+        <InfoBlock label="Friendship prerequisite" value={friendshipValue} icon={<Users />} />
         <InfoBlock label="Temporal owner" value={runContext?.workflowId ?? "Not started"} icon={<Activity />} />
       </div>
 
       <RolePreviewDeck
         scenario={scenario}
+        isSandbox={isSandbox}
+        editorDraft={editorDraft}
         state={state}
         runContext={runContext}
         workflowIssue={workflowIssue}
@@ -683,7 +1101,7 @@ function FlowCanvas({
           <small>visible demo contract</small>
         </div>
         <div className="requirement-list">
-          {scenario.requirements.map((requirement) => (
+          {requirements.map((requirement) => (
             <div className="requirement-row" key={requirement}>
               <CheckCircle2 size={16} />
               <span>{requirement}</span>
@@ -756,6 +1174,8 @@ interface RolePreviewModel {
 
 function RolePreviewDeck({
   scenario,
+  isSandbox,
+  editorDraft,
   state,
   runContext,
   workflowIssue,
@@ -763,6 +1183,8 @@ function RolePreviewDeck({
   onRunAction,
 }: {
   scenario: Scenario;
+  isSandbox: boolean;
+  editorDraft: PairEditorDraft;
   state: TrustedConnectionState | null;
   runContext: RunContext | null;
   workflowIssue: WorkflowRuntimeIssue | null;
@@ -775,15 +1197,24 @@ function RolePreviewDeck({
   const workflowUnavailable = Boolean(
     workflowIssue && runContext && workflowIssue.workflowId === runContext.workflowId,
   );
-  const startAction = getScenarioAction(scenario, "start");
-  const acceptAction = getScenarioAction(scenario, "accept");
-  const approveAction = getScenarioAction(scenario, "approveConsent");
-  const denyAction = getScenarioAction(scenario, "denyConsent");
+  const connectionDraft = isSandbox
+    ? connectionDraftFromWorkflowState(editorDraft, state)
+    : editorDraft;
+  const availableActions = isSandbox
+    ? sandboxActions(connectionDraft, state, runContext, workflowIssue)
+    : scenario.actions;
+  const startAction = getAvailableAction(availableActions, "start");
+  const acceptAction = getAvailableAction(availableActions, "accept");
+  const approveAction = getAvailableAction(availableActions, "approveConsent");
+  const denyAction = getAvailableAction(availableActions, "denyConsent");
   const actionLocked = busyAction !== null || workflowUnavailable;
   const currentStatus = state?.status ?? scenario.expectedInitialStatus;
   const approvalRequired = Boolean(state?.consent_required) || Boolean(approveAction || denyAction);
-  const parentAuthority = scenario.parentChildRelationship || scenario.sourceChannel === "PARENT_CHILD";
+  const parentAuthority = isSandbox
+    ? connectionDraft.parentChildRelationship || connectionDraft.sourceChannel === "PARENT_CHILD"
+    : scenario.parentChildRelationship || scenario.sourceChannel === "PARENT_CHILD";
   const canActOnWorkflow = Boolean(runContext) && !workflowUnavailable && !isClosedStatus(state?.status);
+  const canSendSandboxFact = Boolean(runContext) && !workflowUnavailable && !isTerminalStatus(state?.status);
   const canAccept = Boolean(
     acceptAction && canActOnWorkflow && !state?.accepted && state?.consent_status !== "DENIED",
   );
@@ -798,7 +1229,7 @@ function RolePreviewDeck({
     {
       role: "requester",
       title: scenario.previews.requester.title,
-      userLabel: scenario.requester.label,
+      userLabel: isSandbox ? editorDraft.requester.label : scenario.requester.label,
       runtimeId: runContext?.requesterUserId,
       body: previewBody(scenario.previews.requester, scenario, state, runContext, workflowIssue),
       detail: scenario.previews.requester.detail,
@@ -806,21 +1237,35 @@ function RolePreviewDeck({
       tone: previewTone(scenario, state, runContext, workflowIssue),
       Icon: Send,
       actions:
-        startAction && !runContext
-          ? [
-              {
-                action: startAction,
-                disabled: actionLocked,
-                loading: busyAction === startAction.kind,
-                variant: "primary",
-              },
-            ]
-          : [],
+        isSandbox
+          ? sandboxRoleActions({
+              role: "requester",
+              actions: availableActions,
+              actionLocked,
+              canSendSandboxFact,
+              busyAction,
+            })
+          : startAction && !runContext
+            ? [
+                {
+                  action: startAction,
+                  disabled: actionLocked,
+                  loading: busyAction === startAction.kind,
+                  variant: "primary",
+                },
+              ]
+            : [],
     },
     {
       role: "approver",
       title: scenario.previews.approver.title,
-      userLabel: approvalRequired ? "Parent / approver" : parentAuthority ? scenario.requester.label : "Approver",
+      userLabel: approvalRequired
+        ? "Parent / approver"
+        : parentAuthority
+          ? isSandbox
+            ? editorDraft.requester.label
+            : scenario.requester.label
+          : "Approver",
       runtimeId: parentAuthority ? runContext?.requesterUserId : undefined,
       body: approverBody({
         copy: scenario.previews.approver,
@@ -846,35 +1291,45 @@ function RolePreviewDeck({
           : "neutral",
       Icon: Shield,
       actions:
-        approvalRequired && (approveAction || denyAction)
-          ? [
-              ...(approveAction
-                ? [
-                    {
-                      action: approveAction,
-                      disabled: actionLocked || !canApprove,
-                      loading: busyAction === approveAction.kind,
-                      variant: "primary" as const,
-                    },
-                  ]
-                : []),
-              ...(denyAction
-                ? [
-                    {
-                      action: denyAction,
-                      disabled: actionLocked || !canDeny,
-                      loading: busyAction === denyAction.kind,
-                      variant: "danger" as const,
-                    },
-                  ]
-                : []),
-            ]
-          : [],
+        isSandbox
+          ? sandboxRoleActions({
+              role: "approver",
+              actions: availableActions,
+              actionLocked,
+              canSendSandboxFact,
+              busyAction,
+              canApprove,
+              canDeny,
+            })
+          : approvalRequired && (approveAction || denyAction)
+            ? [
+                ...(approveAction
+                  ? [
+                      {
+                        action: approveAction,
+                        disabled: actionLocked || !canApprove,
+                        loading: busyAction === approveAction.kind,
+                        variant: "primary" as const,
+                      },
+                    ]
+                  : []),
+                ...(denyAction
+                  ? [
+                      {
+                        action: denyAction,
+                        disabled: actionLocked || !canDeny,
+                        loading: busyAction === denyAction.kind,
+                        variant: "danger" as const,
+                      },
+                    ]
+                  : []),
+              ]
+            : [],
     },
     {
       role: "recipient",
       title: scenario.previews.recipient.title,
-      userLabel: scenario.target.label,
+      userLabel: isSandbox ? editorDraft.target.label : scenario.target.label,
       runtimeId: runContext?.targetUserId,
       body: previewBody(scenario.previews.recipient, scenario, state, runContext, workflowIssue),
       detail: scenario.previews.recipient.detail,
@@ -885,16 +1340,26 @@ function RolePreviewDeck({
       tone: previewTone(scenario, state, runContext, workflowIssue),
       Icon: Inbox,
       actions:
-        acceptAction && !state?.accepted
-          ? [
-              {
-                action: acceptAction,
-                disabled: actionLocked || !canAccept,
-                loading: busyAction === acceptAction.kind,
-                variant: "primary",
-              },
-            ]
-          : [],
+        isSandbox
+          ? sandboxRoleActions({
+              role: "recipient",
+              actions: availableActions,
+              actionLocked,
+              canSendSandboxFact,
+              busyAction,
+              canAccept,
+              accepted: state?.accepted,
+            })
+          : acceptAction && !state?.accepted
+            ? [
+                {
+                  action: acceptAction,
+                  disabled: actionLocked || !canAccept,
+                  loading: busyAction === acceptAction.kind,
+                  variant: "primary",
+                },
+              ]
+            : [],
     },
   ];
 
@@ -971,6 +1436,91 @@ function getScenarioAction(
   kind: ScenarioActionKind,
 ): ScenarioAction | undefined {
   return scenario.actions.find((action) => action.kind === kind);
+}
+
+function getAvailableAction(
+  actions: ScenarioAction[],
+  kind: ScenarioActionKind,
+): ScenarioAction | undefined {
+  return actions.find((action) => action.kind === kind);
+}
+
+function sandboxRoleActions({
+  role,
+  actions,
+  actionLocked,
+  canSendSandboxFact,
+  busyAction,
+  canAccept = false,
+  accepted = false,
+  canApprove = false,
+  canDeny = false,
+}: {
+  role: RolePreviewRole;
+  actions: ScenarioAction[];
+  actionLocked: boolean;
+  canSendSandboxFact: boolean;
+  busyAction: ScenarioActionKind | null;
+  canAccept?: boolean;
+  accepted?: boolean;
+  canApprove?: boolean;
+  canDeny?: boolean;
+}): RolePreviewAction[] {
+  const kindsByRole: Record<RolePreviewRole, ScenarioActionKind[]> = {
+    requester: [
+      "start",
+      "removeFriendship",
+      "restoreFriendship",
+      "blockRequester",
+      "restoreRequester",
+      "ageUpRequester",
+      "emitChangedFacts",
+    ],
+    approver: [
+      "approveConsent",
+      "denyConsent",
+      "removeParentChild",
+      "restoreParentChild",
+    ],
+    recipient: ["accept", "blockTarget", "restoreTarget", "ageUpTarget"],
+  };
+
+  return kindsByRole[role]
+    .map((kind) => getAvailableAction(actions, kind))
+    .filter((action): action is ScenarioAction => Boolean(action))
+    .map((action) => {
+      let disabled = actionLocked;
+      let variant: RoleActionVariant = "secondary";
+      if (action.kind === "start") {
+        variant = "primary";
+      } else if (action.kind === "accept") {
+        variant = "primary";
+        disabled = actionLocked || accepted || !canAccept;
+      } else if (action.kind === "approveConsent") {
+        variant = "primary";
+        disabled = actionLocked || !canApprove;
+      } else if (action.kind === "denyConsent") {
+        variant = "danger";
+        disabled = actionLocked || !canDeny;
+      } else if (
+        action.kind === "blockRequester" ||
+        action.kind === "blockTarget" ||
+        action.kind === "removeFriendship" ||
+        action.kind === "removeParentChild"
+      ) {
+        variant = "danger";
+        disabled = actionLocked || !canSendSandboxFact;
+      } else {
+        disabled = actionLocked || !canSendSandboxFact;
+      }
+
+      return {
+        action,
+        disabled,
+        loading: busyAction === action.kind,
+        variant,
+      };
+    });
 }
 
 function previewBody(
@@ -1124,6 +1674,367 @@ function isClosedStatus(status: ConnectionStatus | undefined) {
   return status === "SUSPENDED" || status === "EXPIRED" || status === "DENIED";
 }
 
+function isTerminalStatus(status: ConnectionStatus | undefined) {
+  return status === "EXPIRED" || status === "DENIED";
+}
+
+function sandboxActions(
+  draft: PairEditorDraft,
+  state: TrustedConnectionState | null,
+  runContext: RunContext | null,
+  workflowIssue: WorkflowRuntimeIssue | null,
+): ScenarioAction[] {
+  const actions: ScenarioAction[] = [];
+  const workflowUnavailable = Boolean(
+    workflowIssue && runContext && workflowIssue.workflowId === runContext.workflowId,
+  );
+  const canUseWorkflow = Boolean(runContext) && !workflowUnavailable && !isTerminalStatus(state?.status);
+
+  if (!runContext || workflowUnavailable) {
+    actions.push({
+      kind: "start",
+      label: "Start sandbox",
+      description: "Start a trusted connection from the current sandbox participants.",
+    });
+    if (workflowUnavailable) {
+      actions.push({
+        kind: "refresh",
+        label: "Refresh query",
+        description: "Query workflow state.",
+      });
+    }
+    return actions;
+  }
+
+  if (!state) {
+    actions.push({
+      kind: "refresh",
+      label: "Refresh query",
+      description: "Query workflow state.",
+    });
+    return actions;
+  }
+
+  if (canUseWorkflow && !state.accepted && state.status !== "SUSPENDED") {
+    actions.push({
+      kind: "accept",
+      label: "Accept",
+      description: "Signal recipient acceptance for the active pair.",
+    });
+  }
+  if (canUseWorkflow && state.consent_required && state.consent_status == null) {
+    actions.push(
+      {
+        kind: "approveConsent",
+        label: "Approve consent",
+        description: "Signal approved parental consent.",
+      },
+      {
+        kind: "denyConsent",
+        label: "Deny consent",
+        description: "Signal denied parental consent.",
+      },
+    );
+  }
+
+  const requesterBlocked =
+    !draft.requester.snapshot.is_age_verified || draft.requester.snapshot.is_on_watchlist;
+  const targetBlocked =
+    !draft.target.snapshot.is_age_verified || draft.target.snapshot.is_on_watchlist;
+  actions.push(
+    {
+      kind: draft.areFriends ? "removeFriendship" : "restoreFriendship",
+      label: draft.areFriends ? "Remove friendship" : "Form friendship",
+      description: draft.areFriends
+        ? "Change the pair friendship fact to false and recompute eligibility."
+        : "Change the pair friendship fact to true and recompute eligibility.",
+    },
+    {
+      kind: requesterBlocked ? "restoreRequester" : "blockRequester",
+      label: requesterBlocked ? "Restore requester" : "Block requester",
+      description: requesterBlocked
+        ? "Emit a requester eligibility-restored fact."
+        : "Emit a requester eligibility-loss fact.",
+    },
+    {
+      kind: targetBlocked ? "restoreTarget" : "blockTarget",
+      label: targetBlocked ? "Restore target" : "Block target",
+      description: targetBlocked
+        ? "Emit a target eligibility-restored fact."
+        : "Emit a target eligibility-loss fact.",
+    },
+    {
+      kind: "ageUpRequester",
+      label: "Age up requester",
+      description: "Emit a requester age-change fact.",
+    },
+    {
+      kind: "ageUpTarget",
+      label: "Age up target",
+      description: "Emit a target age-change fact.",
+    },
+    {
+      kind: draft.parentChildRelationship ? "removeParentChild" : "restoreParentChild",
+      label: draft.parentChildRelationship ? "Remove family link" : "Form family link",
+      description: draft.parentChildRelationship
+        ? "Emit a parent-child relationship removed fact."
+        : "Emit a parent-child relationship formed fact.",
+    },
+  );
+
+  if (canUseWorkflow) {
+    actions.push({
+      kind: "emitChangedFacts",
+      label: "Emit editor changes",
+      description: "Publish domain facts for changed editor settings and recompute the workflow.",
+    });
+  }
+  actions.push({
+    kind: "refresh",
+    label: "Refresh query",
+    description: "Query workflow state.",
+  });
+  return actions;
+}
+
+function sandboxRequirements(
+  draft: PairEditorDraft,
+  state: TrustedConnectionState | null,
+  runContext: RunContext | null,
+) {
+  const requirements = [
+    runContext ? "Active workflow owns the pair state" : "Start a sandbox workflow",
+    draft.areFriends ? "Friendship fact: true" : "Friendship fact: false",
+    draft.parentChildRelationship ? "Family relationship: present" : "Family relationship: absent",
+  ];
+  if (state?.consent_required) {
+    requirements.push("Consent currently required");
+  }
+  if (!draft.requester.snapshot.is_age_verified || !draft.target.snapshot.is_age_verified) {
+    requirements.push("Age verification fact can suspend eligibility");
+  }
+  if (draft.requester.snapshot.is_on_watchlist || draft.target.snapshot.is_on_watchlist) {
+    requirements.push("Watchlist fact can suspend eligibility");
+  }
+  return requirements;
+}
+
+function isSandboxAction(kind: ScenarioActionKind) {
+  return [
+    "ageUpRequester",
+    "ageUpTarget",
+    "blockRequester",
+    "blockTarget",
+    "restoreRequester",
+    "restoreTarget",
+    "emitChangedFacts",
+    "removeFriendship",
+    "restoreFriendship",
+    "removeParentChild",
+    "restoreParentChild",
+  ].includes(kind);
+}
+
+function draftForSandboxAction(
+  kind: ScenarioActionKind,
+  draft: PairEditorDraft,
+): PairEditorDraft {
+  if (kind === "emitChangedFacts") {
+    return draft;
+  }
+  if (kind === "removeFriendship" || kind === "restoreFriendship") {
+    return {
+      ...draft,
+      areFriends: kind === "restoreFriendship",
+    };
+  }
+  if (kind === "removeParentChild" || kind === "restoreParentChild") {
+    return {
+      ...draft,
+      parentChildRelationship: kind === "restoreParentChild",
+    };
+  }
+
+  const role =
+    kind === "ageUpTarget" || kind === "blockTarget" || kind === "restoreTarget"
+      ? "target"
+      : "requester";
+  const snapshot = draft[role].snapshot;
+  let nextSnapshot = snapshot;
+  if (kind === "ageUpRequester" || kind === "ageUpTarget") {
+    nextSnapshot = {
+      ...snapshot,
+      age: Math.min(130, snapshot.age + 1),
+    };
+  } else if (kind === "blockRequester" || kind === "blockTarget") {
+    nextSnapshot = {
+      ...snapshot,
+      is_age_verified: false,
+      is_on_watchlist: true,
+    };
+  } else if (kind === "restoreRequester" || kind === "restoreTarget") {
+    nextSnapshot = {
+      ...snapshot,
+      is_age_verified: true,
+      is_on_watchlist: false,
+    };
+  }
+
+  return {
+    ...draft,
+    [role]: {
+      ...draft[role],
+      snapshot: nextSnapshot,
+    },
+  };
+}
+
+function sandboxFactChanges({
+  draft,
+  state,
+  runtimeSnapshots,
+  runContext,
+}: {
+  draft: PairEditorDraft;
+  state: TrustedConnectionState | null;
+  runtimeSnapshots: RuntimeUserSnapshots | null;
+  runContext: RunContext;
+}): SandboxFactChange[] {
+  const currentRequester =
+    state?.requester_snapshot ?? runtimeSnapshots?.requester ?? draft.requester.snapshot;
+  const currentTarget =
+    state?.target_snapshot ?? runtimeSnapshots?.target ?? draft.target.snapshot;
+  const changes: SandboxFactChange[] = [];
+  if (!snapshotsEqual(currentRequester, draft.requester.snapshot)) {
+    changes.push({
+      factType:
+        currentRequester.age !== draft.requester.snapshot.age
+          ? "USER_AGE_CHANGED"
+          : "USER_ELIGIBILITY_CHANGED",
+      subjectRole: "requester",
+      subjectUserId: runContext.requesterUserId,
+      snapshot: draft.requester.snapshot,
+      label: requesterFactLabel(currentRequester, draft.requester.snapshot),
+    });
+  }
+  if (!snapshotsEqual(currentTarget, draft.target.snapshot)) {
+    changes.push({
+      factType:
+        currentTarget.age !== draft.target.snapshot.age
+          ? "USER_AGE_CHANGED"
+          : "USER_ELIGIBILITY_CHANGED",
+      subjectRole: "target",
+      subjectUserId: runContext.targetUserId,
+      snapshot: draft.target.snapshot,
+      label: targetFactLabel(currentTarget, draft.target.snapshot),
+    });
+  }
+  if (state && state.parent_child_relationship !== draft.parentChildRelationship) {
+    changes.push({
+      factType: draft.parentChildRelationship
+        ? "PARENT_CHILD_RELATIONSHIP_FORMED"
+        : "PARENT_CHILD_RELATIONSHIP_REMOVED",
+      subjectRole: "requester",
+      subjectUserId: runContext.requesterUserId,
+      snapshot: draft.requester.snapshot,
+      label: draft.parentChildRelationship
+        ? "Parent-child relationship formed"
+        : "Parent-child relationship removed",
+    });
+  }
+  return changes;
+}
+
+function sandboxConfigurationDirty(
+  draft: PairEditorDraft,
+  state: TrustedConnectionState | null,
+) {
+  if (!state) {
+    return true;
+  }
+  return (
+    state.source_channel !== draft.sourceChannel ||
+    state.are_friends !== draft.areFriends ||
+    state.parent_child_relationship !== draft.parentChildRelationship ||
+    state.auto_accept !== draft.autoAccept ||
+    state.consent_ttl_seconds !== draft.consentTtlSeconds ||
+    !state.requester_snapshot ||
+    !state.target_snapshot ||
+    !snapshotsEqual(state.requester_snapshot, draft.requester.snapshot) ||
+    !snapshotsEqual(state.target_snapshot, draft.target.snapshot)
+  );
+}
+
+function sandboxConfigurationChangeLabels(
+  draft: PairEditorDraft,
+  state: TrustedConnectionState | null,
+) {
+  if (!state) {
+    return [];
+  }
+  const labels: string[] = [];
+  if (state.source_channel !== draft.sourceChannel) {
+    labels.push("Source channel changed");
+  }
+  if (state.are_friends !== draft.areFriends) {
+    labels.push(draft.areFriends ? "Friendship formed" : "Friendship removed");
+  }
+  if (state.parent_child_relationship !== draft.parentChildRelationship) {
+    labels.push(
+      draft.parentChildRelationship
+        ? "Parent-child relationship formed"
+        : "Parent-child relationship removed",
+    );
+  }
+  if (state.auto_accept !== draft.autoAccept) {
+    labels.push("Auto-accept changed");
+  }
+  if (state.consent_ttl_seconds !== draft.consentTtlSeconds) {
+    labels.push("Consent TTL changed");
+  }
+  return labels;
+}
+
+function sandboxChangeSummary(
+  factChanges: SandboxFactChange[],
+  configurationLabels: string[],
+) {
+  const labels = Array.from(
+    new Set([...factChanges.map((change) => change.label), ...configurationLabels]),
+  );
+  return labels.join(", ") || "Pair configuration changed";
+}
+
+function snapshotsEqual(left: UserSnapshot, right: UserSnapshot) {
+  return (
+    left.age === right.age &&
+    left.country_code === right.country_code &&
+    left.is_age_verified === right.is_age_verified &&
+    left.is_on_watchlist === right.is_on_watchlist
+  );
+}
+
+function requesterFactLabel(before: UserSnapshot, after: UserSnapshot) {
+  return userFactLabel("Requester", before, after);
+}
+
+function targetFactLabel(before: UserSnapshot, after: UserSnapshot) {
+  return userFactLabel("Target", before, after);
+}
+
+function userFactLabel(role: string, before: UserSnapshot, after: UserSnapshot) {
+  if (before.age !== after.age) {
+    return `${role} age changed`;
+  }
+  if (
+    before.is_age_verified !== after.is_age_verified ||
+    before.is_on_watchlist !== after.is_on_watchlist
+  ) {
+    return `${role} eligibility changed`;
+  }
+  return `${role} profile changed`;
+}
+
 function WorkflowManager({
   runContext,
   workflowIssue,
@@ -1212,39 +2123,311 @@ function WorkflowManager({
   );
 }
 
+function PairEditor({
+  draft,
+  title,
+  subtitle,
+  resetLabel,
+  applyLabel,
+  runContext,
+  workflowIssue,
+  state,
+  busy,
+  onChange,
+  onReset,
+  onApply,
+}: {
+  draft: PairEditorDraft;
+  title: string;
+  subtitle: string;
+  resetLabel: string;
+  applyLabel: string;
+  runContext: RunContext | null;
+  workflowIssue: WorkflowRuntimeIssue | null;
+  state: TrustedConnectionState | null;
+  busy: boolean;
+  onChange: (draft: PairEditorDraft) => void;
+  onReset: () => void;
+  onApply: () => void;
+}) {
+  const idsLocked = Boolean(runContext);
+  const applyDisabled =
+    !runContext || Boolean(workflowIssue) || isTerminalStatus(state?.status) || busy;
+
+  function updateUser(
+    role: keyof Pick<PairEditorDraft, "requester" | "target">,
+    update: Partial<PairEditorUserDraft>,
+  ) {
+    onChange({
+      ...draft,
+      [role]: {
+        ...draft[role],
+        ...update,
+      },
+    });
+  }
+
+  function updateSnapshot(
+    role: keyof Pick<PairEditorDraft, "requester" | "target">,
+    update: Partial<UserSnapshot>,
+  ) {
+    updateUser(role, {
+      snapshot: {
+        ...draft[role].snapshot,
+        ...update,
+      },
+    });
+  }
+
+  return (
+    <section className="inspector-section pair-editor">
+      <div className="panel-title">
+        <span>{title}</span>
+        <small>{subtitle}</small>
+      </div>
+
+      <div className="editor-users">
+        <EditableUserCard
+          title="Requester"
+          user={draft.requester}
+          runtimeId={runContext?.requesterUserId}
+          idsLocked={idsLocked}
+          onUserChange={(update) => updateUser("requester", update)}
+          onSnapshotChange={(update) => updateSnapshot("requester", update)}
+        />
+        <EditableUserCard
+          title="Target"
+          user={draft.target}
+          runtimeId={runContext?.targetUserId}
+          idsLocked={idsLocked}
+          onUserChange={(update) => updateUser("target", update)}
+          onSnapshotChange={(update) => updateSnapshot("target", update)}
+        />
+      </div>
+
+      <div className="editor-field-grid">
+        <label>
+          <span>Source</span>
+          <select
+            value={draft.sourceChannel}
+            onChange={(event) =>
+              onChange({ ...draft, sourceChannel: event.target.value as SourceChannel })
+            }
+          >
+            {sourceChannelOptions.map((option) => (
+              <option key={option} value={option}>
+                {option}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          <span>Consent TTL</span>
+          <input
+            type="number"
+            min={1}
+            value={draft.consentTtlSeconds}
+            onChange={(event) =>
+              onChange({
+                ...draft,
+                consentTtlSeconds: Math.max(1, Number(event.target.value) || 1),
+              })
+            }
+          />
+        </label>
+      </div>
+
+      <div className="editor-toggle-grid">
+        <EditorCheckbox
+          label="Friends"
+          checked={draft.areFriends}
+          onChange={(checked) => onChange({ ...draft, areFriends: checked })}
+        />
+        <EditorCheckbox
+          label="Parent-child"
+          checked={draft.parentChildRelationship}
+          onChange={(checked) => onChange({ ...draft, parentChildRelationship: checked })}
+        />
+        <EditorCheckbox
+          label="Auto-accept"
+          checked={draft.autoAccept}
+          onChange={(checked) => onChange({ ...draft, autoAccept: checked })}
+        />
+      </div>
+
+      <div className="editor-actions">
+        <button className="editor-button secondary" onClick={onReset} disabled={busy}>
+          <RefreshCw />
+          <span>{resetLabel}</span>
+        </button>
+        <button
+          className="editor-button primary"
+          onClick={onApply}
+          disabled={applyDisabled}
+          title={
+            runContext
+              ? "Apply the edited pair configuration to the active workflow."
+              : "Start a workflow before applying live configuration."
+          }
+        >
+          {busy ? <Loader2 className="spin" /> : <SlidersHorizontal />}
+          <span>{applyLabel}</span>
+        </button>
+      </div>
+    </section>
+  );
+}
+
+function EditableUserCard({
+  title,
+  user,
+  runtimeId,
+  idsLocked,
+  onUserChange,
+  onSnapshotChange,
+}: {
+  title: string;
+  user: PairEditorUserDraft;
+  runtimeId?: string;
+  idsLocked: boolean;
+  onUserChange: (update: Partial<PairEditorUserDraft>) => void;
+  onSnapshotChange: (update: Partial<UserSnapshot>) => void;
+}) {
+  return (
+    <div className="editor-user-card">
+      <div className="editor-user-heading">
+        <strong>{title}</strong>
+        <span>{runtimeId ?? "not started"}</span>
+      </div>
+      <label>
+        <span>Label</span>
+        <input
+          value={user.label}
+          onChange={(event) => onUserChange({ label: event.target.value })}
+        />
+      </label>
+      <label>
+        <span>User ID prefix</span>
+        <input
+          value={user.idPrefix}
+          disabled={idsLocked}
+          onChange={(event) => onUserChange({ idPrefix: event.target.value })}
+        />
+      </label>
+      <div className="editor-field-grid compact">
+        <label>
+          <span>Age</span>
+          <input
+            type="number"
+            min={0}
+            max={130}
+            value={user.snapshot.age}
+            onChange={(event) =>
+              onSnapshotChange({ age: Math.max(0, Number(event.target.value) || 0) })
+            }
+          />
+        </label>
+        <label>
+          <span>Country</span>
+          <input
+            value={user.snapshot.country_code}
+            maxLength={2}
+            onChange={(event) =>
+              onSnapshotChange({ country_code: event.target.value.toUpperCase() })
+            }
+          />
+        </label>
+      </div>
+      <div className="editor-toggle-grid compact">
+        <EditorCheckbox
+          label="Age verified"
+          checked={user.snapshot.is_age_verified}
+          onChange={(checked) => onSnapshotChange({ is_age_verified: checked })}
+        />
+        <EditorCheckbox
+          label="Watchlist"
+          checked={user.snapshot.is_on_watchlist}
+          onChange={(checked) => onSnapshotChange({ is_on_watchlist: checked })}
+        />
+      </div>
+    </div>
+  );
+}
+
+function EditorCheckbox({
+  label,
+  checked,
+  onChange,
+}: {
+  label: string;
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <label className="editor-checkbox">
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(event) => onChange(event.target.checked)}
+      />
+      <span>{label}</span>
+    </label>
+  );
+}
+
 function Inspector({
   scenario,
+  isSandbox,
   state,
   runContext,
   workflowIssue,
   busyAction,
   busyWorkflowControl,
+  busyEditor,
   runtimeSnapshots,
+  editorDraft,
   workflowRuns,
   onCloseActiveWorkflow,
   onCreateNewWorkflow,
   onSetActiveWorkflow,
+  onUpdateEditorDraft,
+  onResetEditorDraft,
+  onApplyEditorConfiguration,
   onRunAction,
 }: {
   scenario: Scenario;
+  isSandbox: boolean;
   state: TrustedConnectionState | null;
   runContext: RunContext | null;
   workflowIssue: WorkflowRuntimeIssue | null;
   busyAction: ScenarioActionKind | null;
   busyWorkflowControl: "close" | "new" | null;
+  busyEditor: boolean;
   runtimeSnapshots: RuntimeUserSnapshots | null;
+  editorDraft: PairEditorDraft;
   workflowRuns: WorkflowRunRecord[];
   onCloseActiveWorkflow: () => void;
   onCreateNewWorkflow: () => void;
   onSetActiveWorkflow: (workflowId: string) => void;
+  onUpdateEditorDraft: (draft: PairEditorDraft) => void;
+  onResetEditorDraft: () => void;
+  onApplyEditorConfiguration: () => void;
   onRunAction: (action: ScenarioAction) => void;
 }) {
   // Add refresh as a UI-only action so scenarios do not need to include it in
   // their business-flow definitions.
-  const actions = [...scenario.actions, { kind: "refresh", label: "Refresh query", description: "Query workflow state." } as ScenarioAction];
+  const actions = isSandbox
+    ? runContext
+      ? [{ kind: "refresh", label: "Refresh query", description: "Query workflow state." } as ScenarioAction]
+      : []
+    : [...scenario.actions, { kind: "refresh", label: "Refresh query", description: "Query workflow state." } as ScenarioAction];
   const workflowUnavailable = Boolean(
     workflowIssue && runContext && workflowIssue.workflowId === runContext.workflowId,
   );
+  const requesterSnapshot =
+    state?.requester_snapshot ?? runtimeSnapshots?.requester ?? editorDraft.requester.snapshot;
+  const targetSnapshot =
+    state?.target_snapshot ?? runtimeSnapshots?.target ?? editorDraft.target.snapshot;
   return (
     <aside className="inspector">
       <WorkflowManager
@@ -1257,30 +2440,50 @@ function Inspector({
         onSetActiveWorkflow={onSetActiveWorkflow}
       />
 
-      <section className="inspector-section">
-        <div className="panel-title">
-          <span>Actions</span>
-          <small>start / signal / event</small>
-        </div>
-        <div className="action-stack">
-          {actions.map((action) => {
-            const Icon = actionIcons[action.kind];
-            const disabled = action.kind !== "start" && (!runContext || workflowUnavailable);
-            return (
-              <button
-                key={action.kind}
-                className="action-button"
-                disabled={disabled || busyAction !== null}
-                onClick={() => onRunAction(action)}
-                title={action.description}
-              >
-                {busyAction === action.kind ? <Loader2 className="spin" /> : <Icon />}
-                <span>{action.label}</span>
-              </button>
-            );
-          })}
-        </div>
-      </section>
+      <PairEditor
+        draft={editorDraft}
+        title={isSandbox ? "Sandbox editor" : "Pair editor"}
+        subtitle={isSandbox ? "fact source" : "operator configuration"}
+        resetLabel={isSandbox ? "Reset sandbox" : "Reset to scenario"}
+        applyLabel={isSandbox ? "Emit changed facts" : "Apply configuration"}
+        runContext={runContext}
+        workflowIssue={workflowIssue}
+        state={state}
+        busy={busyEditor}
+        onChange={onUpdateEditorDraft}
+        onReset={onResetEditorDraft}
+        onApply={onApplyEditorConfiguration}
+      />
+
+      {actions.length > 0 ? (
+        <section className="inspector-section">
+          <div className="panel-title">
+            <span>{isSandbox ? "System" : "Actions"}</span>
+            <small>{isSandbox ? "query" : "start / signal / event"}</small>
+          </div>
+          <div className="action-stack">
+            {actions.map((action) => {
+              const Icon = actionIcons[action.kind];
+              const disabled =
+                action.kind !== "start" &&
+                action.kind !== "emitChangedFacts" &&
+                (!runContext || workflowUnavailable);
+              return (
+                <button
+                  key={action.kind}
+                  className="action-button"
+                  disabled={disabled || busyAction !== null}
+                  onClick={() => onRunAction(action)}
+                  title={action.description}
+                >
+                  {busyAction === action.kind ? <Loader2 className="spin" /> : <Icon />}
+                  <span>{action.label}</span>
+                </button>
+              );
+            })}
+          </div>
+        </section>
+      ) : null}
 
       <section className="inspector-section">
         <div className="panel-title">
@@ -1296,7 +2499,7 @@ function Inspector({
             </div>
             <div>
               <dt>Accepted</dt>
-              <dd>{state ? String(state.accepted) : String(scenario.autoAccept)}</dd>
+              <dd>{state ? String(state.accepted) : String(editorDraft.autoAccept)}</dd>
             </div>
             <div>
               <dt>Consent</dt>
@@ -1320,14 +2523,16 @@ function Inspector({
           <small>demo snapshots</small>
         </div>
         <UserCard
-          user={scenario.requester}
+          label={editorDraft.requester.label}
+          fallbackId={editorDraft.requester.idPrefix}
           runtimeId={runContext?.requesterUserId}
-          snapshot={runtimeSnapshots?.requester ?? scenario.requester.snapshot}
+          snapshot={requesterSnapshot}
         />
         <UserCard
-          user={scenario.target}
+          label={editorDraft.target.label}
+          fallbackId={editorDraft.target.idPrefix}
           runtimeId={runContext?.targetUserId}
-          snapshot={runtimeSnapshots?.target ?? scenario.target.snapshot}
+          snapshot={targetSnapshot}
         />
       </section>
     </aside>
@@ -1335,19 +2540,21 @@ function Inspector({
 }
 
 function UserCard({
-  user,
+  label,
+  fallbackId,
   runtimeId,
   snapshot,
 }: {
-  user: Scenario["requester"];
+  label: string;
+  fallbackId: string;
   runtimeId?: string;
   snapshot: UserSnapshot;
 }) {
   return (
     <div className="user-card">
       <div>
-        <strong>{user.label}</strong>
-        <span>{runtimeId ?? user.id}</span>
+        <strong>{label}</strong>
+        <span>{runtimeId ?? fallbackId}</span>
       </div>
       <SnapshotMeter snapshot={snapshot} />
     </div>
@@ -1402,7 +2609,7 @@ function StatusPill({ status }: { status: ConnectionStatus }) {
 
 async function sendScenarioEvent(
   kind: ScenarioActionKind,
-  scenario: Scenario,
+  draft: PairEditorDraft,
   runContext: RunContext,
 ): Promise<UserSnapshot | null> {
   // Demo buttons produce upstream-style facts. The API translates those facts
@@ -1423,9 +2630,9 @@ async function sendScenarioEvent(
   // For this demo all facts are scoped to the requester. A production consumer
   // would discover affected pair ids from an index/read model and submit one
   // fact per affected pair to this Trusted Friends boundary.
-  const snapshot = snapshotForEvent(kind, scenario);
+  const snapshot = snapshotForEvent(kind, draft);
   await sendDomainFact({
-    factId: `${scenario.id}-${kind}-${Date.now().toString(36)}`,
+    factId: `${runContext.runToken}-${kind}-${Date.now().toString(36)}`,
     factType,
     workflowId: runContext.workflowId,
     userIdA: runContext.requesterUserId,
@@ -1436,26 +2643,26 @@ async function sendScenarioEvent(
   return snapshot;
 }
 
-function snapshotForEvent(kind: ScenarioActionKind, scenario: Scenario): UserSnapshot {
+function snapshotForEvent(kind: ScenarioActionKind, draft: PairEditorDraft): UserSnapshot {
   // Build the changed snapshot from scenario data instead of mutating the
   // original object, which keeps scenario definitions reusable across runs.
   if (kind === "loseEligibility") {
     return {
-      ...scenario.requester.snapshot,
+      ...draft.requester.snapshot,
       is_age_verified: false,
       is_on_watchlist: true,
     };
   }
   if (kind === "ageUp") {
     return {
-      ...scenario.requester.snapshot,
-      age: Math.max(13, scenario.requester.snapshot.age + 1),
+      ...draft.requester.snapshot,
+      age: Math.max(13, draft.requester.snapshot.age + 1),
       is_age_verified: true,
       is_on_watchlist: false,
     };
   }
   return {
-    ...scenario.requester.snapshot,
+    ...draft.requester.snapshot,
     is_age_verified: true,
     is_on_watchlist: false,
   };

@@ -84,6 +84,20 @@ class SendTrustedFriendPayload(BaseModel):
     metadata: dict[str, str] = Field(default_factory=dict)
 
 
+class PairConfigurationPayload(BaseModel):
+    source_channel: SourceChannel = SourceChannel.STANDARD
+    requester_user_id: str | None = None
+    target_user_id: str | None = None
+    requester_snapshot: DemoUserSnapshotPayload
+    target_snapshot: DemoUserSnapshotPayload
+    consent_ttl_seconds: int = Field(DEFAULT_CONSENT_TTL_SECONDS, gt=0)
+    are_friends: bool = True
+    parent_child_relationship: bool = False
+    auto_accept: bool = False
+    trigger: str = "OPERATOR_CONFIGURATION"
+    metadata: dict[str, str] = Field(default_factory=dict)
+
+
 class ParentalConsentPayload(BaseModel):
     consent_id: str
     status: ConsentStatus
@@ -222,6 +236,44 @@ async def close_trusted_friend(
         "workflow_id": workflow_id,
         "closed": True,
     }
+
+
+@app.post("/trusted-friends/{workflow_id}/configuration", status_code=202)
+async def configure_trusted_friend(
+    workflow_id: str,
+    payload: PairConfigurationPayload,
+    client: Client = Depends(get_temporal_client),
+) -> dict[str, object]:
+    """Send a full operator-edited pair configuration to the workflow."""
+    handle = client.get_workflow_handle(workflow_id)
+    if payload.requester_user_id is not None and payload.target_user_id is not None:
+        requester_user_id = payload.requester_user_id
+        target_user_id = payload.target_user_id
+        await _ensure_workflow_running(handle, workflow_id, "signal")
+    else:
+        state = await _query_pair_workflow_state(handle, workflow_id)
+        requester_user_id = str(state["requester_user_id"])
+        target_user_id = str(state["target_user_id"])
+    request = TrustedConnectionRequest(
+        requester_user_id=requester_user_id,
+        target_user_id=target_user_id,
+        source_channel=payload.source_channel,
+        requester_snapshot=_snapshot(requester_user_id, payload.requester_snapshot),
+        target_snapshot=_snapshot(target_user_id, payload.target_snapshot),
+        consent_ttl_seconds=payload.consent_ttl_seconds,
+        are_friends=payload.are_friends,
+        parent_child_relationship=payload.parent_child_relationship,
+        auto_accept=payload.auto_accept,
+        trigger=payload.trigger,
+        metadata=payload.metadata,
+    )
+    await _signal_pair_workflow(
+        handle,
+        workflow_id,
+        TrustedConnectionWorkflow.apply_configuration,
+        request,
+    )
+    return _signal_response(workflow_id, "apply_configuration")
 
 
 @app.get("/trusted-friends/{workflow_id}")
