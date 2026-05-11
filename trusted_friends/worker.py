@@ -56,6 +56,7 @@ async def main() -> None:
     # Prometheus metrics are especially useful in Cloud demos because they show
     # whether the worker is polling, executing workflow tasks, and draining
     # activity work. This must be set before the SDK runtime is first used.
+    
     Runtime.set_default(
         Runtime(
             telemetry=TelemetryConfig(
