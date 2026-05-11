@@ -5,7 +5,6 @@ set -euo pipefail
 # Cloud marks one build as the current version for new workflow tasks. This
 # script performs the second step for the demo namespace.
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-PACKAGE_VERSION="$(cd "${ROOT_DIR}" && python -c 'import pathlib, tomllib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')"
 
 # Load .env when present so the command can be run from a fresh terminal without
 # re-exporting the Temporal API key and namespace every time.
@@ -23,7 +22,7 @@ set +a
 TEMPORAL_NAMESPACE="${TEMPORAL_NAMESPACE:-tf-demo.zsvab}"
 TEMPORAL_ADDRESS="${TEMPORAL_ADDRESS:-${TEMPORAL_NAMESPACE}.tmprl.cloud:7233}"
 TEMPORAL_WORKER_DEPLOYMENT_NAME="${TEMPORAL_WORKER_DEPLOYMENT_NAME:-trusted-friends-demo}"
-TEMPORAL_WORKER_BUILD_ID="${TEMPORAL_WORKER_BUILD_ID:-${PACKAGE_VERSION}}"
+TEMPORAL_WORKER_BUILD_ID="${TEMPORAL_WORKER_BUILD_ID:-latest-8b4f}"
 
 # Promote the build id for new tasks. Existing workflow executions may still
 # follow their pinned versioning behavior depending on how they were started.

@@ -6,7 +6,6 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PACKAGE_ARCHIVE="${ROOT_DIR}/output/temporal-cloud-deployment/trusted-friends-temporal-cloud.tar.gz"
 DOCKER_CONTEXT="${ROOT_DIR}/output/temporal-cloud-deployment/docker-context-ecr"
-PACKAGE_VERSION="$(cd "${ROOT_DIR}" && python -c 'import pathlib, tomllib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')"
 
 # These defaults match the demo account and region, but every value can be
 # overridden by exporting the variable before invoking the script.
@@ -14,7 +13,7 @@ AWS_PROFILE="${AWS_PROFILE:-SolutionsArchitecture/AWSAdministratorAccess}"
 AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-west-2}"
 AWS_ACCOUNT_ID="${AWS_ACCOUNT_ID:-429214323166}"
 ECR_REPO="${ECR_REPO:-trusted-friends-demo}"
-IMAGE_TAG="${IMAGE_TAG:-${PACKAGE_VERSION}}"
+IMAGE_TAG="${IMAGE_TAG:-latest}"
 PLATFORM="${PLATFORM:-linux/amd64}"
 ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
 ECR_IMAGE="${ECR_REGISTRY}/${ECR_REPO}:${IMAGE_TAG}"
