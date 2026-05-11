@@ -23,7 +23,7 @@ import {
   closeTrustedFriend,
   getTrustedFriend,
   isQueryBackpressureError,
-  sendEligibilityEvent,
+  sendDomainFact,
   sendParentalConsent,
   startTrustedFriend,
   workflowIssueFromError,
@@ -32,6 +32,7 @@ import { scenarios } from "./scenarios";
 import type {
   ConnectionStatus,
   DemoEvent,
+  DomainFactType,
   RunContext,
   Scenario,
   ScenarioAction,
@@ -75,7 +76,7 @@ const actionIcons: Record<ScenarioActionKind, typeof Activity> = {
   refresh: RefreshCw,
 };
 
-const WORKFLOW_QUERY_INTERVAL_MS = 10000;
+const WORKFLOW_QUERY_INTERVAL_MS = 500;
 // Initial workflow tasks can take longer in Temporal Cloud than local dev,
 // especially immediately after a worker deploy. These retries give the worker
 // time to process the first task without hammering consistent queries.
@@ -1404,31 +1405,32 @@ async function sendScenarioEvent(
   scenario: Scenario,
   runContext: RunContext,
 ): Promise<UserSnapshot | null> {
-  // Async processors are represented as separate event workflows in the backend.
-  // This mapping chooses which external event type to emit for each demo button.
-  const eventTypeByKind = {
-    loseEligibility: "ELIGIBILITY_CHANGED",
-    restoreEligibility: "ELIGIBILITY_CHANGED",
-    ageUp: "AGE_CHANGED",
-    removeParentChild: "PARENT_CHILD_REMOVED",
-    restoreParentChild: "PARENT_CHILD_FORMED",
-  } as const;
-
-  if (!(kind in eventTypeByKind)) {
+  // Demo buttons produce upstream-style facts. The API translates those facts
+  // into TF-domain eligibility events so transition logic stays in one place.
+  const factTypeByKind: Partial<Record<ScenarioActionKind, DomainFactType>> = {
+    loseEligibility: "USER_ELIGIBILITY_CHANGED",
+    restoreEligibility: "USER_ELIGIBILITY_CHANGED",
+    ageUp: "USER_AGE_CHANGED",
+    removeParentChild: "PARENT_CHILD_RELATIONSHIP_REMOVED",
+    restoreParentChild: "PARENT_CHILD_RELATIONSHIP_FORMED",
+  };
+  const factType = factTypeByKind[kind];
+  if (!factType) {
     return null;
   }
 
-  const changedUserId = runContext.requesterUserId;
-  // For this demo all eligibility mutations affect the requester. The pair
-  // workflow receives the event through Temporal signaling after evaluation.
+  const subjectUserId = runContext.requesterUserId;
+  // For this demo all facts are scoped to the requester. A production consumer
+  // would discover affected pair ids from an index/read model and submit one
+  // fact per affected pair to this Trusted Friends boundary.
   const snapshot = snapshotForEvent(kind, scenario);
-  await sendEligibilityEvent({
-    eventId: `${scenario.id}-${kind}-${Date.now().toString(36)}`,
+  await sendDomainFact({
+    factId: `${scenario.id}-${kind}-${Date.now().toString(36)}`,
+    factType,
     workflowId: runContext.workflowId,
     userIdA: runContext.requesterUserId,
     userIdB: runContext.targetUserId,
-    changedUserId,
-    eventType: eventTypeByKind[kind as keyof typeof eventTypeByKind],
+    subjectUserId,
     snapshot,
   });
   return snapshot;

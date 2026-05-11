@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from trusted_friends.models import (
+    DomainFact,
+    DomainFactType,
     EligibilityDecision,
     EligibilityEvent,
     EligibilityEventType,
@@ -148,6 +150,7 @@ def evaluate_eligibility_event(event: EligibilityEvent) -> EligibilityUpdate:
             changed_user_id=event.changed_user_id,
             eligible=False,
             reason="PARENT_CHILD_RELATIONSHIP_REMOVED",
+            event_type=event.event_type,
         )
 
     if event.event_type == EligibilityEventType.PARENTAL_CONSENT_REJECTED:
@@ -156,6 +159,7 @@ def evaluate_eligibility_event(event: EligibilityEvent) -> EligibilityUpdate:
             changed_user_id=event.changed_user_id,
             eligible=False,
             reason="PARENTAL_CONSENT_REJECTED",
+            event_type=event.event_type,
         )
 
     if event.event_type == EligibilityEventType.PARENT_CHILD_FORMED:
@@ -167,6 +171,7 @@ def evaluate_eligibility_event(event: EligibilityEvent) -> EligibilityUpdate:
             reason="PARENT_CHILD_RELATIONSHIP_FORMED"
             if decision.eligible
             else decision.reason,
+            event_type=event.event_type,
         )
 
     if event.event_type == EligibilityEventType.PARENTAL_CONSENT_APPROVED:
@@ -175,6 +180,7 @@ def evaluate_eligibility_event(event: EligibilityEvent) -> EligibilityUpdate:
             changed_user_id=event.changed_user_id,
             eligible=True,
             reason="PARENTAL_CONSENT_APPROVED",
+            event_type=event.event_type,
         )
 
     decision = evaluate_user(event.snapshot)
@@ -187,4 +193,34 @@ def evaluate_eligibility_event(event: EligibilityEvent) -> EligibilityUpdate:
         changed_user_id=event.changed_user_id,
         eligible=decision.eligible,
         reason=reason,
+        event_type=event.event_type,
+    )
+
+
+def eligibility_event_from_domain_fact(fact: DomainFact) -> EligibilityEvent:
+    """Map an upstream fact to the TF-domain event consumed by Temporal.
+
+    This is the anti-duplication boundary: Kafka producers only state what
+    changed in their own domain. This function, owned by Trusted Friends,
+    decides which workflow event type that fact represents.
+    """
+    event_type_by_fact_type = {
+        DomainFactType.USER_ELIGIBILITY_CHANGED: EligibilityEventType.ELIGIBILITY_CHANGED,
+        DomainFactType.USER_AGE_CHANGED: EligibilityEventType.AGE_CHANGED,
+        DomainFactType.PARENT_CHILD_RELATIONSHIP_FORMED: (
+            EligibilityEventType.PARENT_CHILD_FORMED
+        ),
+        DomainFactType.PARENT_CHILD_RELATIONSHIP_REMOVED: (
+            EligibilityEventType.PARENT_CHILD_REMOVED
+        ),
+    }
+
+    return EligibilityEvent(
+        event_id=fact.fact_id,
+        user_id_a=fact.user_id_a,
+        user_id_b=fact.user_id_b,
+        changed_user_id=fact.subject_user_id,
+        snapshot=fact.snapshot,
+        pair_workflow_id=fact.pair_workflow_id,
+        event_type=event_type_by_fact_type[fact.fact_type],
     )

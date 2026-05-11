@@ -216,6 +216,41 @@ async def test_eligibility_event_starts_short_lived_workflow() -> None:
     assert fake.started[0]["versioning_override"] is None
 
 
+async def test_domain_fact_is_translated_before_starting_event_workflow() -> None:
+    fake = FakeTemporalClient()
+    app.dependency_overrides[get_temporal_client] = lambda: fake
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            response = await client.post(
+                "/events/domain-facts",
+                json={
+                    "fact_id": "fact-parent-removed",
+                    "fact_type": "PARENT_CHILD_RELATIONSHIP_REMOVED",
+                    "user_id_a": "parent",
+                    "user_id_b": "child",
+                    "subject_user_id": "parent",
+                    "snapshot": {
+                        "age": 42,
+                        "country_code": "US",
+                        "is_age_verified": True,
+                        "is_on_watchlist": False,
+                    },
+                },
+            )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 202
+    assert response.json()["workflow_id"] == "eligibility-eval-fact-parent-removed"
+    event = fake.started[0]["arg"]
+    assert event.event_id == "fact-parent-removed"
+    assert event.event_type == "PARENT_CHILD_REMOVED"
+    assert event.pair_workflow_id == "trusted-connection-child-parent"
+
+
 async def test_get_returns_gone_for_terminated_pair_workflow() -> None:
     fake = FakeTemporalClient()
     fake.handles["trusted-connection-alice-bob"] = FakeHandle(

@@ -25,6 +25,12 @@ export type EligibilityEventType =
   | "PARENTAL_CONSENT_APPROVED"
   | "PARENTAL_CONSENT_REJECTED";
 
+export type DomainFactType =
+  | "USER_ELIGIBILITY_CHANGED"
+  | "USER_AGE_CHANGED"
+  | "PARENT_CHILD_RELATIONSHIP_FORMED"
+  | "PARENT_CHILD_RELATIONSHIP_REMOVED";
+
 export interface UserSnapshot {
   // A point-in-time view of user safety attributes. Temporal workflows store
   // snapshots instead of fetching live user records so workflow decisions remain

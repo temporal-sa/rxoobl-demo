@@ -1,4 +1,6 @@
 from trusted_friends.models import (
+    DomainFact,
+    DomainFactType,
     EligibilityEvent,
     EligibilityEventType,
     SourceChannel,
@@ -6,6 +8,7 @@ from trusted_friends.models import (
     UserEligibilitySnapshot,
 )
 from trusted_friends.rules import (
+    eligibility_event_from_domain_fact,
     evaluate_eligibility_event,
     evaluate_pair,
     evaluate_trusted_connection_request,
@@ -117,3 +120,22 @@ def test_eligibility_event_rules_live_in_central_rule_set() -> None:
 
     assert not update.eligible
     assert update.reason == "AGE_VERIFICATION_REQUIRED"
+    assert update.event_type == EligibilityEventType.ELIGIBILITY_CHANGED
+
+
+def test_domain_fact_mapping_is_owned_by_trusted_friends_rules() -> None:
+    event = eligibility_event_from_domain_fact(
+        DomainFact(
+            fact_id="fact-1",
+            fact_type=DomainFactType.USER_AGE_CHANGED,
+            user_id_a="alice",
+            user_id_b="bob",
+            subject_user_id="alice",
+            snapshot=UserEligibilitySnapshot("alice", age=13),
+            pair_workflow_id="trusted-connection-alice-bob",
+        )
+    )
+
+    assert event.event_id == "fact-1"
+    assert event.event_type == EligibilityEventType.AGE_CHANGED
+    assert event.changed_user_id == "alice"

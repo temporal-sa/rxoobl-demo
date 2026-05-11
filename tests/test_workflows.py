@@ -17,6 +17,7 @@ from trusted_friends.models import (
     ConnectionStatus,
     ConsentStatus,
     EligibilityEvent,
+    EligibilityEventType,
     ParentalConsent,
     RelationshipEvent,
     RelationshipEventType,
@@ -345,6 +346,71 @@ async def test_eligibility_workflow_suspends_and_restores_pair() -> None:
                 assert update.eligible
                 restored = await wait_for_status(handle, ConnectionStatus.TRUSTED)
                 assert restored.last_eligibility_event_id == "event-restore"
+
+
+async def test_parent_child_fact_updates_pair_relationship_state() -> None:
+    task_queue = str(uuid.uuid4())
+    async with await start_temporal_environment() as env:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as activity_executor:
+            async with Worker(
+                env.client,
+                task_queue=task_queue,
+                workflows=[TrustedConnectionWorkflow, EligibilityEvaluationWorkflow],
+                activities=ACTIVITIES,
+                activity_executor=activity_executor,
+            ):
+                pair_workflow_id = workflow_id_for_pair("parent-event", "child-event")
+                handle = await env.client.start_workflow(
+                    TrustedConnectionWorkflow.run,
+                    TrustedConnectionRequest(
+                        requester_user_id="parent-event",
+                        target_user_id="child-event",
+                        source_channel=SourceChannel.PARENT_CHILD,
+                        requester_snapshot=UserEligibilitySnapshot("parent-event", age=42),
+                        target_snapshot=UserEligibilitySnapshot("child-event", age=14),
+                        parent_child_relationship=True,
+                        auto_accept=True,
+                        trigger="PARENT_CHILD_AUTO_UPGRADE",
+                    ),
+                    id=pair_workflow_id,
+                    task_queue=task_queue,
+                )
+                trusted = await wait_for_status(handle, ConnectionStatus.TRUSTED)
+                assert trusted.parent_child_relationship
+
+                await env.client.execute_workflow(
+                    EligibilityEvaluationWorkflow.run,
+                    EligibilityEvent(
+                        event_id="event-parent-child-removed",
+                        user_id_a="parent-event",
+                        user_id_b="child-event",
+                        changed_user_id="parent-event",
+                        snapshot=UserEligibilitySnapshot("parent-event", age=42),
+                        pair_workflow_id=pair_workflow_id,
+                        event_type=EligibilityEventType.PARENT_CHILD_REMOVED,
+                    ),
+                    id="eligibility-eval-event-parent-child-removed",
+                    task_queue=task_queue,
+                )
+                suspended = await wait_for_status(handle, ConnectionStatus.SUSPENDED)
+                assert not suspended.parent_child_relationship
+
+                await env.client.execute_workflow(
+                    EligibilityEvaluationWorkflow.run,
+                    EligibilityEvent(
+                        event_id="event-parent-child-formed",
+                        user_id_a="parent-event",
+                        user_id_b="child-event",
+                        changed_user_id="parent-event",
+                        snapshot=UserEligibilitySnapshot("parent-event", age=42),
+                        pair_workflow_id=pair_workflow_id,
+                        event_type=EligibilityEventType.PARENT_CHILD_FORMED,
+                    ),
+                    id="eligibility-eval-event-parent-child-formed",
+                    task_queue=task_queue,
+                )
+                restored = await wait_for_status(handle, ConnectionStatus.TRUSTED)
+                assert restored.parent_child_relationship
 
 
 async def test_eligibility_workflow_completes_if_pair_was_terminated() -> None:

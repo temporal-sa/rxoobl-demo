@@ -1,4 +1,5 @@
 import type {
+  DomainFactType,
   EligibilityEventType,
   SendTrustedFriendPayload,
   TrustedConnectionState,
@@ -229,6 +230,29 @@ export function sendEligibilityEvent(payload: {
       changed_user_id: payload.changedUserId,
       pair_workflow_id: payload.workflowId,
       event_type: payload.eventType,
+      snapshot: payload.snapshot,
+    }),
+  });
+}
+
+export function sendDomainFact(payload: {
+  factId: string;
+  factType: DomainFactType;
+  workflowId: string;
+  userIdA: string;
+  userIdB: string;
+  subjectUserId: string;
+  snapshot: UserSnapshot;
+}) {
+  return request<EligibilityStartResponse>("/events/domain-facts", {
+    method: "POST",
+    body: JSON.stringify({
+      fact_id: payload.factId,
+      fact_type: payload.factType,
+      user_id_a: payload.userIdA,
+      user_id_b: payload.userIdB,
+      subject_user_id: payload.subjectUserId,
+      pair_workflow_id: payload.workflowId,
       snapshot: payload.snapshot,
     }),
   });

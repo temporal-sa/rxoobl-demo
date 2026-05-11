@@ -22,6 +22,8 @@ from temporalio.exceptions import WorkflowAlreadyStartedError
 
 from trusted_friends.models import (
     ConsentStatus,
+    DomainFact,
+    DomainFactType,
     EligibilityEvent,
     EligibilityEventType,
     ParentalConsent,
@@ -29,7 +31,7 @@ from trusted_friends.models import (
     TrustedConnectionRequest,
     UserEligibilitySnapshot,
 )
-from trusted_friends.rules import workflow_id_for_pair
+from trusted_friends.rules import eligibility_event_from_domain_fact, workflow_id_for_pair
 from trusted_friends.settings import DEFAULT_CONSENT_TTL_SECONDS, TASK_QUEUE
 from trusted_friends.temporal_client import connect_temporal_client
 from trusted_friends.versioning import workflow_versioning_override
@@ -96,6 +98,18 @@ class EligibilityEventPayload(BaseModel):
     snapshot: DemoUserSnapshotPayload
     pair_workflow_id: str | None = None
     event_type: EligibilityEventType = EligibilityEventType.ELIGIBILITY_CHANGED
+
+
+class DomainFactPayload(BaseModel):
+    """Generic upstream fact, not a trusted-friend state transition command."""
+
+    fact_id: str
+    fact_type: DomainFactType
+    user_id_a: str
+    user_id_b: str
+    subject_user_id: str
+    snapshot: DemoUserSnapshotPayload
+    pair_workflow_id: str | None = None
 
 
 async def get_temporal_client() -> Client:
@@ -247,29 +261,41 @@ async def eligibility_event(
         pair_workflow_id=pair_workflow_id,
         event_type=payload.event_type,
     )
-    workflow_id = f"eligibility-eval-{payload.event_id}"
+    return await _start_eligibility_evaluation(client, event)
 
-    try:
-        # Eligibility event IDs are expected to be unique. Rejecting duplicates
-        # makes event replay/idempotency bugs visible in the demo.
-        await client.start_workflow(
-            EligibilityEvaluationWorkflow.run,
-            event,
-            id=workflow_id,
-            task_queue=TASK_QUEUE,
-            id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
-            versioning_override=workflow_versioning_override(),
-        )
-    except WorkflowAlreadyStartedError as exc:
-        raise HTTPException(
-            status_code=409,
-            detail=f"Eligibility event workflow already exists: {workflow_id}",
-        ) from exc
 
-    return {
-        "workflow_id": workflow_id,
-        "pair_workflow_id": pair_workflow_id,
-    }
+@app.post("/events/domain-facts", status_code=202)
+async def domain_fact(
+    payload: DomainFactPayload,
+    client: Client = Depends(get_temporal_client),
+) -> dict[str, object]:
+    """Accept an upstream fact and let Trusted Friends interpret its effect.
+
+    Real Kafka consumers should do this translation in the Trusted Friends
+    service boundary. Producers publish facts they own; they do not publish TF
+    transition commands like "suspend" or "restore".
+    """
+    pair_workflow_id = payload.pair_workflow_id or workflow_id_for_pair(
+        payload.user_id_a,
+        payload.user_id_b,
+    )
+    pair_handle = client.get_workflow_handle(pair_workflow_id)
+    await _ensure_workflow_running(
+        pair_handle,
+        pair_workflow_id,
+        "process domain fact",
+    )
+    fact = DomainFact(
+        fact_id=payload.fact_id,
+        fact_type=payload.fact_type,
+        user_id_a=payload.user_id_a,
+        user_id_b=payload.user_id_b,
+        subject_user_id=payload.subject_user_id,
+        snapshot=_snapshot(payload.subject_user_id, payload.snapshot),
+        pair_workflow_id=pair_workflow_id,
+    )
+    event = eligibility_event_from_domain_fact(fact)
+    return await _start_eligibility_evaluation(client, event)
 
 
 def _snapshot(
@@ -298,6 +324,36 @@ def _signal_response(workflow_id: str, signal: str) -> dict[str, object]:
         "signal": signal,
         "accepted": True,
         "status_url": f"/trusted-friends/{workflow_id}",
+    }
+
+
+async def _start_eligibility_evaluation(
+    client: Client,
+    event: EligibilityEvent,
+) -> dict[str, object]:
+    """Start the short-lived event workflow for a TF-domain eligibility event."""
+    workflow_id = f"eligibility-eval-{event.event_id}"
+
+    try:
+        # Eligibility event IDs are expected to be unique. Rejecting duplicates
+        # makes event replay/idempotency bugs visible in the demo.
+        await client.start_workflow(
+            EligibilityEvaluationWorkflow.run,
+            event,
+            id=workflow_id,
+            task_queue=TASK_QUEUE,
+            id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
+            versioning_override=workflow_versioning_override(),
+        )
+    except WorkflowAlreadyStartedError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Eligibility event workflow already exists: {workflow_id}",
+        ) from exc
+
+    return {
+        "workflow_id": workflow_id,
+        "pair_workflow_id": event.pair_workflow_id,
     }
 
 

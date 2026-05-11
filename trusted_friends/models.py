@@ -44,6 +44,15 @@ class EligibilityEventType(StrEnum):
     PARENTAL_CONSENT_REJECTED = "PARENTAL_CONSENT_REJECTED"
 
 
+class DomainFactType(StrEnum):
+    """Facts published by upstream systems before TF-specific interpretation."""
+
+    USER_ELIGIBILITY_CHANGED = "USER_ELIGIBILITY_CHANGED"
+    USER_AGE_CHANGED = "USER_AGE_CHANGED"
+    PARENT_CHILD_RELATIONSHIP_FORMED = "PARENT_CHILD_RELATIONSHIP_FORMED"
+    PARENT_CHILD_RELATIONSHIP_REMOVED = "PARENT_CHILD_RELATIONSHIP_REMOVED"
+
+
 class RelationshipEventType(StrEnum):
     """Internal events consumed by the workflow state machine."""
 
@@ -108,11 +117,30 @@ class EligibilityEvent:
 
 
 @dataclass
+class DomainFact:
+    """Raw fact from another bounded context.
+
+    Upstream producers should publish facts they own, such as a user profile or
+    family-graph change. They should not decide trusted-friend state transitions;
+    the Trusted Friends domain converts these facts into workflow events.
+    """
+
+    fact_id: str
+    fact_type: DomainFactType
+    user_id_a: str
+    user_id_b: str
+    subject_user_id: str
+    snapshot: UserEligibilitySnapshot
+    pair_workflow_id: str
+
+
+@dataclass
 class EligibilityUpdate:
     event_id: str
     changed_user_id: str
     eligible: bool
     reason: str
+    event_type: EligibilityEventType = EligibilityEventType.ELIGIBILITY_CHANGED
 
 
 @dataclass

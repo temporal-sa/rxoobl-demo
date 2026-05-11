@@ -21,6 +21,7 @@ with workflow.unsafe.imports_passed_through():
         ConsentStatus,
         EligibilityDecision,
         EligibilityEvent,
+        EligibilityEventType,
         EligibilityUpdate,
         ParentalConsent,
         RelationshipEvent,
@@ -112,6 +113,10 @@ class _RelationshipValidationStateMachine:
                 return
             update = event.eligibility_update
             state.last_eligibility_event_id = update.event_id
+            if update.event_type == EligibilityEventType.PARENT_CHILD_FORMED:
+                state.parent_child_relationship = True
+            elif update.event_type == EligibilityEventType.PARENT_CHILD_REMOVED:
+                state.parent_child_relationship = False
             state.eligibility_decision = EligibilityDecision(
                 eligible=update.eligible,
                 consent_required=state.consent_required,
@@ -233,7 +238,9 @@ class _RelationshipValidationStateMachine:
             return False
         return now >= state.consent_deadline
 
-
+# This state machine workflow owns the entire lifecycle of a trusted connection between two users. 
+# It processes signals for user actions and async eligibility events, maintains the current state of the relationship, and emits status changes to downstream systems. 
+# The workflow history serves as the source of truth for the relationship, and queries can be used to read the current state at any time.
 @workflow.defn(versioning_behavior=workflow_versioning_behavior())
 class TrustedConnectionWorkflow:
     """Long-lived workflow that owns one normalized trusted-friend pair.
@@ -445,7 +452,12 @@ class TrustedConnectionWorkflow:
             transitions=list(state.transitions),
         )
 
-
+# This workflow handles async events independently of the primary pair workflow
+# This architecture provides a number of benefits including:
+# 1. Separation of concerns: The eligibility evaluation logic is decoupled from the main pair workflow, making it easier to maintain and evolve each component independently.
+# 2. Scalability: The short-lived eligibility workflow can be scaled independently to handle varying loads of eligibility events without impacting the main pair workflow.
+# 3. Idempotency and reliability: By using a separate workflow to process eligibility events, we can ensure that each event is processed exactly once and that any retries or failures are handled gracefully without affecting the main pair workflow.
+# 4. Observability: This design allows for better monitoring and debugging of eligibility events, as they are processed in a dedicated workflow with its own history and logs, separate from the main pair workflow.
 @workflow.defn(versioning_behavior=workflow_versioning_behavior())
 class EligibilityEvaluationWorkflow:
     """Short-lived workflow that fans async eligibility events into the pair workflow."""
