@@ -43,9 +43,14 @@ brew install temporal
 
 ## Run Locally
 
-Use four terminals.
+Local mode uses `temporal server start-dev` and does not need a Temporal Cloud
+API key. Because the checked-in defaults target Temporal Cloud, export the local
+Temporal settings in the worker and API terminals before starting those
+processes. Exported variables take precedence over any repo-local `.env`.
 
-1. Start Temporal:
+Use four terminals from the repo root.
+
+1. Start local Temporal:
 
 ```bash
 temporal server start-dev
@@ -84,20 +89,70 @@ Open `http://127.0.0.1:5173`.
 The API listens on `http://127.0.0.1:8000`. The frontend can be pointed at a
 different API with `VITE_API_BASE_URL`.
 
+Local Temporal Web is available at `http://127.0.0.1:8233`.
+
 ## Run Against Temporal Cloud
 
-The default Temporal settings now target the Temporal Cloud namespace
-`tf-demo.zsvab` at `tf-demo.zsvab.tmprl.cloud:7233`. Provide a Temporal Cloud
-API key before starting the worker or API. You can either export it in the
-shell or put it in a repo-local `.env` copied from `.env.example`; the Python
-worker/API load `.env` automatically without overriding exported variables.
+Cloud mode connects the worker and API to the Temporal Cloud namespace
+`tf-demo.zsvab` at `tf-demo.zsvab.tmprl.cloud:7233`. You need a Temporal Cloud
+API key that can access that namespace.
+
+1. Create a local `.env` file:
+
+```bash
+cp .env.example .env
+```
+
+2. Edit `.env` and set at least:
+
+```bash
+TEMPORAL_NAMESPACE=tf-demo.zsvab
+TEMPORAL_ADDRESS=tf-demo.zsvab.tmprl.cloud:7233
+TEMPORAL_TLS=true
+TEMPORAL_API_KEY=<temporal-cloud-api-key>
+TASK_QUEUE=trusted-friends-demo
+```
+
+The Python worker/API and the Cloud launcher scripts load `.env`
+automatically. Exported shell variables still win over `.env`, which is useful
+for container or orchestrator overrides.
+
+3. Start the Cloud worker:
+
+```bash
+uv run ./scripts/run_temporal_cloud_worker.sh
+```
+
+4. Start the Cloud-backed API:
+
+```bash
+uv run ./scripts/run_temporal_cloud_api.sh
+```
+
+5. Start the frontend:
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Open `http://127.0.0.1:5173`.
+
+For one-off Cloud runs, you can skip `.env` and export the API key directly in
+each worker/API terminal:
 
 ```bash
 export TEMPORAL_API_KEY=<temporal-cloud-api-key>
-uv run python -m trusted_friends.worker
+uv run ./scripts/run_temporal_cloud_worker.sh
 ```
 
-For local development, override the Cloud defaults:
+```bash
+export TEMPORAL_API_KEY=<temporal-cloud-api-key>
+uv run ./scripts/run_temporal_cloud_api.sh
+```
+
+To switch a terminal back to local Temporal, override the Cloud defaults:
 
 ```bash
 export TEMPORAL_NAMESPACE=default
