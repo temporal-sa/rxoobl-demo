@@ -54,12 +54,20 @@ temporal server start-dev
 2. Start the worker:
 
 ```bash
+export TEMPORAL_NAMESPACE=default
+export TEMPORAL_ADDRESS=localhost:7233
+export TEMPORAL_TLS=false
+unset TEMPORAL_API_KEY
 uv run python -m trusted_friends.worker
 ```
 
 3. Start the API:
 
 ```bash
+export TEMPORAL_NAMESPACE=default
+export TEMPORAL_ADDRESS=localhost:7233
+export TEMPORAL_TLS=false
+unset TEMPORAL_API_KEY
 uv run uvicorn trusted_friends.api:app --reload
 ```
 
@@ -80,7 +88,9 @@ different API with `VITE_API_BASE_URL`.
 
 The default Temporal settings now target the Temporal Cloud namespace
 `tf-demo.zsvab` at `tf-demo.zsvab.tmprl.cloud:7233`. Provide a Temporal Cloud
-API key before starting the worker or API:
+API key before starting the worker or API. You can either export it in the
+shell or put it in a repo-local `.env` copied from `.env.example`; the Python
+worker/API load `.env` automatically without overriding exported variables.
 
 ```bash
 export TEMPORAL_API_KEY=<temporal-cloud-api-key>

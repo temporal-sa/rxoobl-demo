@@ -1,6 +1,31 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ -f "${ROOT_DIR}/.env" ]]; then
+  while IFS= read -r raw_line || [[ -n "${raw_line}" ]]; do
+    line="${raw_line#"${raw_line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [[ -z "${line}" || "${line}" == \#* ]] && continue
+    [[ "${line}" == export\ * ]] && line="${line#export }"
+
+    key="${line%%=*}"
+    value="${line#*=}"
+    key="${key%"${key##*[![:space:]]}"}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    [[ "${line}" != *=* || ! "${key}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] && continue
+    [[ -n "${!key+x}" ]] && continue
+
+    if [[ ${#value} -ge 2 && "${value:0:1}" == "${value: -1}" ]]; then
+      case "${value:0:1}" in
+        "'" | '"') value="${value:1:${#value}-2}" ;;
+      esac
+    fi
+    export "${key}=${value}"
+  done < "${ROOT_DIR}/.env"
+fi
+
 # The worker needs the same Cloud connection settings as the API, plus a
 # deployment name/build id so Temporal Cloud can route workflows to a compatible
 # version when Worker Versioning is enabled.

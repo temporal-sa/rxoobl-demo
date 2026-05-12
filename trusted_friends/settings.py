@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 
 def _env_bool(name: str, *, default: bool) -> bool:
@@ -9,6 +10,34 @@ def _env_bool(name: str, *, default: bool) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "t", "yes", "y", "on"}
+
+
+def _load_dotenv() -> None:
+    """Load a simple .env file without overriding exported process env."""
+    if not _env_bool("TRUSTED_FRIENDS_LOAD_ENV_FILE", default=True):
+        return
+
+    env_path = Path(os.getenv("TRUSTED_FRIENDS_ENV_FILE", ".env"))
+    if not env_path.is_file():
+        return
+
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line.removeprefix("export ").strip()
+        key, separator, value = line.partition("=")
+        key = key.strip()
+        if not separator or not key or key in os.environ:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        os.environ[key] = value
+
+
+_load_dotenv()
 
 
 # These defaults intentionally target Temporal Cloud. Local development can

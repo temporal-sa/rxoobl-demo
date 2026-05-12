@@ -10,6 +10,8 @@ import trusted_friends.settings as settings
 # Keep the list explicit so each test starts from a known environment instead of
 # inheriting local .env or shell values.
 TEMPORAL_ENV_KEYS = {
+    "TRUSTED_FRIENDS_ENV_FILE",
+    "TRUSTED_FRIENDS_LOAD_ENV_FILE",
     "TEMPORAL_ADDRESS",
     "TEMPORAL_API_KEY",
     "TEMPORAL_NAMESPACE",
@@ -26,6 +28,7 @@ def reload_settings(monkeypatch, **values: str):
 
     for key in TEMPORAL_ENV_KEYS:
         monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("TRUSTED_FRIENDS_LOAD_ENV_FILE", "false")
     for key, value in values.items():
         monkeypatch.setenv(key, value)
     return importlib.reload(settings)
@@ -51,6 +54,35 @@ def test_local_temporal_override_can_disable_tls(monkeypatch) -> None:
     assert reloaded.TEMPORAL_NAMESPACE == "default"
     assert reloaded.TEMPORAL_ADDRESS == "localhost:7233"
     assert reloaded.TEMPORAL_TLS is False
+
+
+def test_env_file_values_are_loaded_without_overriding_shell_env(monkeypatch, tmp_path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "TEMPORAL_NAMESPACE=from-file",
+                "TEMPORAL_ADDRESS=from-file.tmprl.cloud:7233",
+                "TEMPORAL_TLS=true",
+                "TEMPORAL_API_KEY=from-file-key",
+                "TASK_QUEUE=from-file-queue",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    reloaded = reload_settings(
+        monkeypatch,
+        TRUSTED_FRIENDS_LOAD_ENV_FILE="true",
+        TRUSTED_FRIENDS_ENV_FILE=str(env_file),
+        TEMPORAL_API_KEY="from-shell-key",
+    )
+
+    assert reloaded.TEMPORAL_NAMESPACE == "from-file"
+    assert reloaded.TEMPORAL_ADDRESS == "from-file.tmprl.cloud:7233"
+    assert reloaded.TEMPORAL_TLS is True
+    assert reloaded.TEMPORAL_API_KEY == "from-shell-key"
+    assert reloaded.TASK_QUEUE == "from-file-queue"
 
 
 def test_worker_versioning_defaults_on_when_deployment_version_is_set(monkeypatch) -> None:
